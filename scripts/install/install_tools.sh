@@ -152,8 +152,7 @@ install_tools_macos() {
         wget \
         curl \
         git \
-        unzip \
-        openjdk@8
+        unzip
     
     # Install bioinformatics tools
     brew install \
@@ -162,7 +161,7 @@ install_tools_macos() {
         bcftools \
         bedtools \
         fastqc \
-        sra-toolkit \
+        sratoolkit \
         htslib
     
     print_success "Tools installed via Homebrew"
@@ -178,28 +177,6 @@ install_cnvpytor() {
     else
         print_warning "pip3 not found, skipping CNVpytor installation"
     fi
-}
-
-# Install snpEff
-install_snpeff() {
-    print_status "Installing snpEff..."
-    
-    local snpeff_dir="/opt/snpEff"
-    local snpeff_url="https://sourceforge.net/projects/snpeff/files/snpEff_v4_3t_core.zip"
-    
-    # Create directory
-    sudo mkdir -p "$snpeff_dir"
-    
-    # Download and extract
-    cd /tmp
-    wget -O snpEff.zip "$snpeff_url"
-    sudo unzip -o snpEff.zip -d "$snpeff_dir"
-    rm snpEff.zip
-    
-    # Create symlink
-    sudo ln -sf "$snpeff_dir/snpEff/snpEff.jar" /usr/local/bin/snpEff.jar
-    
-    print_success "snpEff installed to $snpeff_dir"
 }
 
 # Main function
@@ -254,7 +231,6 @@ main() {
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             install_tools "$os_type"
             install_cnvpytor
-            install_snpeff
             
             echo
             print_status "Re-checking tools after installation..."
@@ -278,7 +254,7 @@ main() {
     print_status "Next steps:"
     echo "  1. Install the Python package: pip install sra-to-features-pipeline"
     echo "  2. Download reference genomes and annotation files"
-    echo "  3. Configure the pipeline using environment variables or .env file"
+    echo "  3. Configure the pipeline using the config.ini file"
     echo "  4. Run: sra-pipeline validate"
     echo
 }

@@ -30,10 +30,14 @@ dependencies = [
     "cnvpytor>=1.3.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
+    "scikit-learn>=1.7.1",
+    "seaborn>=0.13.2",
     "structlog>=23.2.0",
     "psutil>=5.9.0",
+    "nvidia-ml-py>=13.580.82",
     "click>=8.0.0",
     "rich>=13.0.0",
+    "vcfpy>=0.14.2"
 ]
 
 [project.optional-dependencies]

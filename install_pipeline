@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+# Exit on error and undefined variables
+set -euo pipefail
+
+echo "🚀 Setting up SRA to Features Pipeline Development Environment"
+# Create and open a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+echo "🐍 Installing pipeline dependencies..."
+
+# Install bioinformatics tools and pipeline
+bash ./scripts/install/install_tools.sh
+bash ./install_dev.sh
+
+echo "✅ Development environment setup complete!"
+
+echo "Which reference genome would you like to download?"
+echo "1) Human (GRCh38)"
+echo "2) Candida glabrata (CBS138)"
+echo "3) Candida albicans (SC5314)"
+echo "If none of these, the default variables inside config.ini will be used."
+read -p "Enter the number corresponding to your choice: " genome_choice
+
+case $genome_choice in
+    1)
+        # Set fasta and gff urls for hg38
+        python3 scripts/install/update_config.py config.ini Parameters GENOME_NAME custom_human
+        python3 scripts/install/update_config.py config.ini Links FASTA_URL https://ftp.ensembl.org/pub/release-109/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+        python3 scripts/install/update_config.py config.ini Links GFF_URL https://ftp.ensembl.org/pub/release-109/gff3/homo_sapiens/Homo_sapiens.GRCh38.109.gff3.gz
+        ;;
+    2)
+        # Set fasta and gff urls for Candida glabrata
+        python3 scripts/install/update_config.py config.ini Parameters GENOME_NAME custom_cglab
+        python3 scripts/install/update_config.py config.ini Links FASTA_URL http://www.candidagenome.org/download/sequence/C_glabrata_CBS138/current/C_glabrata_CBS138_current_chromosomes.fasta.gz
+        python3 scripts/install/update_config.py config.ini Links GFF_URL http://www.candidagenome.org/download/gff/C_glabrata_CBS138/C_glabrata_CBS138_current_features.gff
+        ;;
+    3)
+        # Set fasta and gff urls for Candida albicans
+        python3 scripts/install/update_config.py config.ini Parameters GENOME_NAME custom_calb
+        python3 scripts/install/update_config.py config.ini Links FASTA_URL http://www.candidagenome.org/download/sequence/C_albicans_SC5314/Assembly22/current/C_albicans_SC5314_A22_current_chromosomes.fasta.gz
+        python3 scripts/install/update_config.py config.ini Links GFF_URL http://www.candidagenome.org/download/gff/C_albicans_SC5314/Assembly22/C_albicans_SC5314_A22_current_features.gff
+        ;;
+    *)
+        echo "Using the default values from config.ini"
+        ;;
+esac
+
+# Run the CLI setup script with the selected genome
+sra-pipeline-setup

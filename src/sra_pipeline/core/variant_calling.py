@@ -121,24 +121,13 @@ def _run_mpileup(
     logger: structlog.BoundLogger
 ) -> Path:
     """Run bcftools mpileup to generate pileup."""
-    bcf_file = output_dir / f"{sample_id}.bcf"
-    
-    cmd = [
-        "bcftools", "mpileup",
-        "-f", str(reference_fasta),
-        str(bam_file),
-        "-o", str(bcf_file)
-    ]
-    
-    log_command(logger, " ".join(cmd), sample_id=sample_id)
-    
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            #timeout=7200  # 2 hour timeout
+        bcf_file = _run_mpileup_by_chr(
+            sample_id=sample_id,
+            bam_file=bam_file,
+            reference_fasta=reference_fasta,
+            output_dir=output_dir,
+            logger=logger
         )
         
         logger.info("Mpileup completed", 
@@ -151,6 +140,107 @@ def _run_mpileup(
         raise RuntimeError(f"Mpileup timed out for sample: {sample_id}")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Mpileup failed for sample {sample_id}: {e.stderr}")
+    except Exception as e:
+        raise RuntimeError(f"Mpileup encountered an error for sample {sample_id}: {str(e)}")
+
+
+def _run_mpileup_by_chr(
+    sample_id: str,
+    bam_file: Path,
+    reference_fasta: Path,
+    output_dir: Path,
+    logger: structlog.BoundLogger
+) -> Path:
+    
+    logger.info("Running mpileup by chromosome", sample_id=sample_id)
+
+    # Make sure output directory exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get list of chromosomes from the reference
+    chrom_sizes_file = Path(str(reference_fasta) + ".fai")
+
+    # Only index if the .fai does NOT already exist
+    if not chrom_sizes_file.exists():
+        cmd_idx = ["samtools", "faidx", str(reference_fasta)]
+        subprocess.run(cmd_idx, check=True)
+
+    if not chrom_sizes_file.exists():
+        raise RuntimeError(
+            "FASTA index (.fai) not found and could not be created."
+        )
+
+    chromosomes = []
+    with chrom_sizes_file.open() as f:
+        for line in f:
+            chrom = line.split("\t")[0]
+            chromosomes.append(chrom)
+
+    if not chromosomes:
+        raise RuntimeError("No chromosomes found in FASTA index.")
+
+    # Run mpileup per chromosome
+    per_chrom_bcf = []
+    for chrom in chromosomes:
+        chrom_bcf = output_dir / f"{sample_id}.{chrom}.bcf"
+
+        cmd = [
+            "bcftools", "mpileup",
+            "-f", str(reference_fasta),
+            "-r", chrom,
+            str(bam_file),
+            "-o", str(chrom_bcf),
+            "-d", "200",
+            "--threads", "1"
+        ]
+
+        logger.info(f"Running mpileup on {chrom}...", 
+                    sample_id=sample_id, chromosome=chrom)
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        if result.stderr:
+            logger.debug(f'Mpileup stderr: {result.stderr.strip()}')
+        
+        per_chrom_bcf.append(str(chrom_bcf))
+
+    # Combine all partial BCFs
+    final_bcf = output_dir / f"{sample_id}.bcf"
+
+    logger.info("Concatenating chromosome BCF files...", 
+                sample_id=sample_id)
+    cmd_concat = [
+        "bcftools", "concat", "-o", str(final_bcf), "-O", "b"
+    ] + per_chrom_bcf
+    result = subprocess.run(
+        cmd_concat, 
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    if result.stderr:
+        logger.debug(f'Mpileup stderr: {result.stderr.strip()}')
+
+    logger.info(f"Final BCF generated at: {final_bcf}. " + \
+                "Cleaning up temporary chromosome BCF files...", 
+                sample_id=sample_id)
+
+    for tmp_bcf in per_chrom_bcf:
+        try:
+            Path(tmp_bcf).unlink()
+        except Exception as e:
+            logger.warning(f"Could not delete {tmp_bcf}: {e}", 
+                           sample_id=sample_id)
+    
+    logger.info("Cleanup finished.", sample_id=sample_id)
+
+    return final_bcf
 
 
 def _call_variants(

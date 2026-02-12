@@ -5,9 +5,21 @@ Logging utilities for the SRA to Features Pipeline.
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
 import structlog
 from structlog.stdlib import LoggerFactory
+from typing import Any, Dict, Callable, Optional
+
+import asyncio
+import csv
+import datetime
+import psutil
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    GPU_AVAILABLE = True
+except:
+    GPU_AVAILABLE = False
 
 
 def setup_logging(
@@ -125,7 +137,11 @@ class PipelineLogger:
 class PerformanceMonitor:
     """Monitor and log performance metrics."""
     
-    def __init__(self, logger: structlog.BoundLogger):
+    def __init__(
+        self,
+        logger: structlog.BoundLogger,
+        csv_path: str = "performance_log.csv"
+    ):
         """
         Initialize the performance monitor.
         
@@ -135,6 +151,28 @@ class PerformanceMonitor:
         self.logger = logger
         self.metrics: Dict[str, float] = {}
         self.start_times: Dict[str, float] = {}
+
+        # Async monitor control
+        self._stop_event = asyncio.Event()
+        self._monitor_task: Optional[asyncio.Task] = None
+        self.current_section: str = "init"
+
+        # CSV logging
+        self.csv_path = csv_path
+
+        # peaks
+        self.peak_ram_mb = 0.0
+        self.peak_cpu = 0.0
+        self.peak_gpu_mem_mb = 0.0
+        self.peak_gpu_mem_percent = 0.0
+        self.peak_ram_mb_section = 0.0
+        self.peak_cpu_section = 0.0
+        self.peak_gpu_mem_mb_section = 0.0
+        self.peak_gpu_mem_percent_section = 0.0
+        # Disk usage tracking
+        self.disk_base_bytes_section = 0
+        self.peak_disk_delta_mb_section = 0.0
+        self.disk_path = None # set per run
     
     def start_timer(self, name: str):
         """Start a timer for a named operation."""
@@ -160,7 +198,6 @@ class PerformanceMonitor:
     def log_memory_usage(self):
         """Log current memory usage."""
         try:
-            import psutil
             process = psutil.Process()
             memory_info = process.memory_info()
             
@@ -176,8 +213,6 @@ class PerformanceMonitor:
     def log_system_info(self):
         """Log system information."""
         try:
-            import psutil
-            
             self.logger.info(
                 "System information",
                 cpu_count=psutil.cpu_count(),
@@ -187,9 +222,199 @@ class PerformanceMonitor:
         except ImportError:
             self.logger.warning("psutil not available, cannot log system info")
     
+    def set_disk_path(self, path: Path):
+        """
+        Set the path whose filesystem will be monitored for disk usage.
+        Must be called before start_monitoring().
+        """
+        self.disk_path = path
+        # Initialize baseline immediately
+        self.disk_base_bytes_section = psutil.disk_usage(self.disk_path).used
+
+    def _get_disk_used_bytes(self) -> int:
+        if self.disk_path is None:
+            raise RuntimeError(
+                "disk_path is not set. Call set_disk_path() before start_monitoring()."
+            )
+        return psutil.disk_usage(self.disk_path).used
+
     def get_summary(self) -> Dict[str, float]:
         """Get a summary of all recorded metrics."""
         return self.metrics.copy()
+    
+    def init_csv(self):
+        header = [
+            "timestamp",
+            "section",
+            # CPU
+            "cpu_total_percent",
+            "proc_cpu_percent",
+            "proc_cpu_cores",
+            # RAM
+            "ram_total_percent",
+            "system_ram_used_mb",
+            "proc_ram_mb",
+            # GPU
+            "gpu_mem_mb",
+            "gpu_mem_total",
+            # Disk
+            "disk_delta_mb"
+        ]
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+    
+    async def _monitor_loop(self, interval: float):
+        """Run until stop is requested."""
+        try:
+            process = psutil.Process()
+            process.cpu_percent(interval=None) # prime the CPU counter
+
+            while not self._stop_event.is_set():
+                # Timestamp
+                timestamp = datetime.datetime.now().isoformat()
+                # CPU
+                cpu_total = psutil.cpu_percent(interval=None)
+                proc_cpu_percent = process.cpu_percent(interval=None)
+                proc_cpu_cores = proc_cpu_percent / 100.0
+                # RAM
+                vm = psutil.virtual_memory()
+                ram_total_percent = vm.percent
+                system_ram_used_mb = vm.used / 1024**2
+                proc_ram = process.memory_info().rss / 1024**2 # MB
+                # Disk
+                disk_used = self._get_disk_used_bytes()
+                disk_delta_mb = (disk_used - self.disk_base_bytes_section) / 1024**2 # MB
+                self.peak_disk_delta_mb_section = max(
+                    self.peak_disk_delta_mb_section,
+                    disk_delta_mb
+                )
+                # GPU
+                gpu_mem = None
+                gpu_mem_percent = None
+                gpu_mem_total = None
+                if GPU_AVAILABLE:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    gpu_mem = mem_info.used / 1024**2
+                    gpu_mem_total = mem_info.total / 1024**2
+                    gpu_mem_percent = 100.0 * mem_info.used / mem_info.total
+
+                # Update peaks
+                self.peak_cpu = max(self.peak_cpu, proc_cpu_cores)
+                self.peak_cpu_section = max(self.peak_cpu_section, proc_cpu_cores)
+                self.peak_ram_mb = max(self.peak_ram_mb, system_ram_used_mb)
+                self.peak_ram_mb_section = max(self.peak_ram_mb_section, system_ram_used_mb)
+                if GPU_AVAILABLE and gpu_mem is not None:
+                    self.peak_gpu_mem_mb = max(self.peak_gpu_mem_mb, gpu_mem)
+                    self.peak_gpu_mem_mb_section = max(self.peak_gpu_mem_mb_section, gpu_mem)
+                    self.peak_gpu_mem_percent = max(self.peak_gpu_mem_percent, gpu_mem_percent)
+                    self.peak_gpu_mem_percent_section = max(self.peak_gpu_mem_percent_section, gpu_mem_percent)
+
+                # Write CSV row
+                with open(self.csv_path, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        timestamp,
+                        self.current_section,
+                        # CPU
+                        cpu_total,
+                        proc_cpu_percent,
+                        proc_cpu_cores,
+                        # RAM
+                        ram_total_percent,
+                        system_ram_used_mb,
+                        proc_ram,
+                        # GPU
+                        gpu_mem,
+                        gpu_mem_total,
+                        # Disk
+                        disk_delta_mb
+                    ])
+
+                await asyncio.sleep(interval)
+        except Exception as e:
+            self.logger.exception(f"Performance monitor crashed with error {e}")
+            raise
+    
+    def _monitor_task_done(self, task: asyncio.Task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.logger.error(
+                "Performance monitor task failed.",
+                exc_info=exc
+            )
+
+    def start_monitoring(
+        self,
+        interval: float = 1.0,
+        section: str = "global"
+    ):
+        """Start asynchronous background monitoring."""
+        self._stop_event.clear()
+        self.current_section = section
+        self._monitor_task = asyncio.create_task(self._monitor_loop(interval))
+        self._monitor_task.add_done_callback(self._monitor_task_done)
+
+    async def stop_monitoring(self):
+        """Stop async monitor and wait for its task to finish."""
+        self._stop_event.set()
+        if self._monitor_task:
+            await self._monitor_task
+    
+    async def wrap_section(self, section_name: str, coro):
+        """
+        Run an async section while monitoring and tagging metrics
+        with its section name.
+        """
+        self.current_section = section_name
+        return await coro
+
+    def report_peaks(self):
+        self.logger.info(
+            "Peak resource usage (total)",
+            peak_cpu_percent=self.peak_cpu,
+            peak_ram_mb=self.peak_ram_mb,
+            peak_gpu_mem_mb=self.peak_gpu_mem_mb,
+            peak_gpu_mem_percent=self.peak_gpu_mem_percent
+        )
+        if self.current_section != "global":
+            self.logger.info(
+                f"Peak resource usage ({self.current_section})",
+                peak_cpu_percent_section=self.peak_cpu_section,
+                peak_ram_mb_section=self.peak_ram_mb_section,
+                peak_gpu_mem_mb_section=self.peak_gpu_mem_mb_section,
+                peak_gpu_mem_percent_section=self.peak_gpu_mem_percent_section,
+                peak_disk_delta_mb_section=self.peak_disk_delta_mb_section
+            )
+        # Reset section peaks
+        self.reset_section_peaks()
+    
+    def reset_section_peaks(self):
+        """Reset peak metrics for the current section."""
+        self.peak_ram_mb_section = 0.0
+        self.peak_cpu_section = 0.0
+        self.peak_gpu_mem_mb_section = 0.0
+        self.peak_gpu_util_section = 0.0
+        # Reset disk usage stats
+        self.disk_base_bytes_section = self._get_disk_used_bytes()
+        self.peak_disk_delta_mb_section = 0.0
+
+    async def section(self, name: str, func: Callable, *args, **kwargs):
+        # Reset section peaks
+        self.reset_section_peaks()
+        # Start the section timer
+        self.current_section = name
+        self.start_timer(name)
+
+        result = await asyncio.to_thread(func, *args, **kwargs)
+
+        self.report_peaks()
+
+        self.stop_timer(name)
+        return result
 
 
 def log_command(logger: structlog.BoundLogger, command: str, **kwargs):

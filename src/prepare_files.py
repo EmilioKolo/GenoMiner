@@ -43,6 +43,21 @@ def main():
     fasta_file = config['Paths']['REFERENCE_FASTA']
     gff_file = config['Paths']['REFERENCE_GFF']
     bed_genes = config['Paths']['BED_GENES']
+    snpeff_dir = config['Paths']['SNPEFF_DIR']
+    snpeff_genome = config['Parameters']['GENOME_NAME']
+    snpeff_url = config['Links']['SNPEFF_URL']
+
+    # Index fasta file using samtools faidx
+    print(f'Indexing {fasta_file} using samtools faidx...')
+    try:
+        subprocess.run(['samtools', 'faidx', fasta_file], check=True)
+        print(f'Indexing of {fasta_file} completed.')
+    except subprocess.CalledProcessError as e:
+        print(f'Error indexing {fasta_file}: {e}')
+        # Remove partially created index file if it exists
+        fai_file = fasta_file + '.fai'
+        if Path(fai_file).exists():
+            Path(fai_file).unlink()
 
     # Creation of genome.sizes file
     print(f'Creating {genome_sizes} file...')
@@ -123,6 +138,34 @@ def main():
             str_bed = f"{chr}\t{start}\t{end}\t{name}\n"
             f.write(str_bed)
     print(f'{bed_genes} file created and populated.')
+
+    print('Running snpEff installation script...')
+
+    # Run snpEff installation script
+    install_snpeff_script = Path("scripts/install/install_snpeff.sh")
+    if not install_snpeff_script.exists():
+        print(f"Error: {install_snpeff_script} does not exist.")
+        sys.exit(1)
+    try:
+        subprocess.run(
+            [
+                "bash",
+                str(install_snpeff_script),
+                snpeff_dir,
+                snpeff_url,
+                snpeff_genome,
+                fasta_file,
+                gff_file
+            ],
+            check=True
+        )
+        print("snpEff installed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error during snpEff installation: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error during snpEff installation: {e}")
+        sys.exit(1)
 
     print('🎉 Setup complete.')
 

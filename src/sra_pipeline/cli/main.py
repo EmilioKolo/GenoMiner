@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List
 import click
+import configparser
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -16,7 +17,10 @@ from ..utils import setup_logging, PipelineLogger, PerformanceMonitor
 from ..utils.ml_features import (
     normalize_feature_table,
     merge_with_metadata,
-    per_feature_analysis
+    per_feature_analysis,
+    cross_validated_feature_analysis,
+    run_model_validation_and_test,
+    full_evaluation_manager
 )
 from .. import __version__
 
@@ -52,11 +56,12 @@ def cli():
 @click.option(
     "--config",
     help="Configuration file path",
+    default='./config.ini',
     type=click.Path(exists=True, path_type=Path),
 )
 @click.option(
     "--threads",
-    default=1,
+    default=0,
     help="Number of threads to use",
     type=int,
 )
@@ -84,7 +89,7 @@ def run(
     threads: int,
     log_level: str,
     log_file: Optional[Path],
-    dry_run: bool,
+    dry_run: bool
 ):
     """Run the SRA to Features Pipeline."""
     
@@ -104,16 +109,21 @@ def run(
     # Load configuration
     try:
         if config:
-            pipeline_config = PipelineConfig(_env_file=config)
+            pipeline_config = load_pipeline_config(config)
         else:
             pipeline_config = PipelineConfig()
         
         # Override config with CLI options
         pipeline_config.output_dir = output_dir
-        pipeline_config.threads = threads
+        if threads:
+            pipeline_config.threads = threads
         pipeline_config.log_level = log_level
         pipeline_config.log_file = log_file
-        
+
+    except configparser.Error as e:
+        # Catch errors like malformed lines, etc.
+        print(f"Error reading configuration file {config}: {e}")
+        sys.exit(1)
     except Exception as e:
         console.print(f"[red]Error loading configuration: {e}[/red]")
         sys.exit(1)
@@ -145,24 +155,14 @@ def run(
     missing_fields = []
     if pipeline_config.reference_fasta is None:
         missing_fields.append("reference_fasta")
-    if pipeline_config.reference_gff is None:
-        missing_fields.append("reference_gff")
-    if pipeline_config.bed_genes is None:
-        missing_fields.append("bed_genes")
-    if pipeline_config.genome_sizes is None:
-        missing_fields.append("genome_sizes")
-    
+    if pipeline_config.base_dir is None:
+        missing_fields.append("base_dir")
+    if pipeline_config.output_dir is None:
+        missing_fields.append("output_dir")
+
     if missing_fields:
         console.print(f"[red]Error: Missing required configuration fields: {', '.join(missing_fields)}[/red]")
-        console.print("[yellow]Please provide these fields via:[/yellow]")
-        console.print("  - Environment variables (SRA_PIPELINE_REFERENCE_FASTA, etc.)")
-        console.print("  - Configuration file (--config option)")
-        console.print("  - .env file in the current directory")
-        console.print("\n[yellow]Example configuration:[/yellow]")
-        console.print("  export SRA_PIPELINE_REFERENCE_FASTA=/path/to/reference.fasta")
-        console.print("  export SRA_PIPELINE_REFERENCE_GFF=/path/to/reference.gff")
-        console.print("  export SRA_PIPELINE_BED_GENES=/path/to/genes.bed")
-        console.print("  export SRA_PIPELINE_GENOME_SIZES=/path/to/genome.sizes")
+        console.print("[yellow]Please provide these fields via configuration file (--config option)[/yellow]")
         sys.exit(1)
     
     # Initialize pipeline
@@ -214,6 +214,7 @@ def run(
 @click.option(
     "--config",
     help="Configuration file path",
+    default='./config.ini',
     type=click.Path(exists=True, path_type=Path),
 )
 @click.option(
@@ -260,13 +261,14 @@ def batch(
     # Load configuration
     try:
         if config:
-            pipeline_config = PipelineConfig(_env_file=config)
+            pipeline_config = load_pipeline_config(config)
         else:
             pipeline_config = PipelineConfig()
         
         # Override config with CLI options
         pipeline_config.output_dir = output_dir
-        pipeline_config.threads = threads
+        if threads:
+            pipeline_config.threads = threads
         pipeline_config.log_level = log_level
         pipeline_config.log_file = log_file
         
@@ -310,6 +312,7 @@ def batch(
 @click.option(
     "--config",
     help="Configuration file path",
+    default='./config.ini',
     type=click.Path(exists=True, path_type=Path),
 )
 def validate(config: Optional[Path]):
@@ -444,6 +447,12 @@ def create_feature_table(
     type=click.Path(path_type=Path),
 )
 @click.option(
+    "--parameters",
+    required=False,
+    help="JSON file with normalization parameters. If given, normalization uses these parameters. Otherwise, parameters are created and saved.",
+    type=click.Path(exists=True, path_type=Path)
+)
+@click.option(
     "--random-seed",
     default=None,
     type=int,
@@ -459,6 +468,7 @@ def create_normalized_table(
     input_file: Path,
     metadata_file: Optional[Path],
     output_folder: Path,
+    parameters: Optional[Path],
     random_seed: Optional[int],
     log_level: str
 ):
@@ -472,7 +482,8 @@ def create_normalized_table(
             input_file=input_file,
             output_folder=output_folder,
             logger=logger,
-            rand_seed=random_seed
+            rand_seed=random_seed,
+            parameters_file=parameters
         )
 
         # Check if metadata file is provided
@@ -547,11 +558,14 @@ def create_normalized_table(
 )
 @click.option(
     "--analysis-type",
-    default="RandomForest",
-    type=click.Choice(["RandomForest"]),
+    default="CVRF",
+    type=click.Choice([
+        "RandomForest", "CrossValidatedRandomForest", "CVRF"
+    ]),
     help=str(
-        "Analysis type to be performed (default: RandomForest). "+\
-        "Currently, only RandomForest is supported."
+        "Analysis type to be performed (default: CVRF). " +\
+        "Currently, only Random Forest and Cross-validated " +\
+        "Random Forest (CVRF) are supported."
     ),
 )
 @click.option(
@@ -575,6 +589,12 @@ def create_normalized_table(
     ),
 )
 @click.option(
+    "--split-n",
+    default=5,
+    type=int,
+    help="Number of splits for cross-validation.",
+)
+@click.option(
     "--random-seed",
     default=None,
     type=int,
@@ -592,6 +612,7 @@ def classify_features(
     analysis_type: str,
     target_variable: str,
     top_feature_n: int,
+    split_n: int,
     random_seed: Optional[int],
     log_level: str
 ):
@@ -601,6 +622,8 @@ def classify_features(
     """
     # Setup logging
     logger = setup_logging(log_level=log_level)
+    # Define lists of analysis types
+    l_cvrf = ["crossvalidatedrandomforest", "cvrf"]
     try:
         if analysis_type.lower() == 'randomforest':
             per_feature_analysis(
@@ -609,6 +632,16 @@ def classify_features(
                 target_var=target_variable,
                 logger=logger,
                 top_n=top_feature_n,
+                rand_seed=random_seed
+            )
+        elif analysis_type.lower() in l_cvrf:
+            cross_validated_feature_analysis(
+                table_name=input_file,
+                output_folder=output_folder,
+                target_var=target_variable,
+                logger=logger,
+                top_n=top_feature_n,
+                split_n=split_n,
                 rand_seed=random_seed
             )
         else:
@@ -639,6 +672,12 @@ def classify_features(
     help="Output folder path.",
 )
 @click.option(
+    "--log-level",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
+    help="Logging level",
+)
+@click.option(
     "--target-variable",
     default="Diagnosis",
     type=str,
@@ -659,7 +698,8 @@ def run_model_validation_test(
     model_path: Path,
     data_table_path: Path,
     output_folder: Path,
-    target_var: Optional[str]='Diagnosis',
+    log_level: str,
+    target_variable: Optional[str]='Diagnosis',
     out_name: Optional[str]=''
 ):
     """
@@ -670,14 +710,16 @@ def run_model_validation_test(
                   "and test...[/bold blue]")
     
     try:
-        from ..utils.ml_features import run_model_validation_and_test
-        
+        # Setup logging
+        logger = setup_logging(log_level=log_level)
+
         # Run model validation and test
         run_model_validation_and_test(
             model_path,
             data_table_path,
             output_folder,
-            target_var,
+            target_variable,
+            logger,
             out_name
         )
         
@@ -771,6 +813,85 @@ def create_ml_table(
         
     except Exception as e:
         console.print(f"[red]Error creating ML feature table: {e}[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option(
+    "--model-path",
+    required=True,
+    help="Pickled model file path.",
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--data-table-path",
+    required=True,
+    help="Data table file path to run the model on (CSV format).",
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--output-folder",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Output folder path.",
+)
+@click.option(
+    "--log-level",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
+    help="Logging level",
+)
+@click.option(
+    "--target-variable",
+    default="Diagnosis",
+    type=str,
+    help=str(
+        "Name of the target variable column in the data "+\
+        "(default: 'Diagnosis')."
+    ),
+)
+@click.option(
+    "--out-name",
+    default="",
+    type=str,
+    help=str(
+        "Name suffix for output files (default: '')."
+    ),
+)
+def evaluate_pickled_model(
+    model_path: Path,
+    data_table_path: Path,
+    output_folder: Path,
+    log_level: str,
+    target_variable: Optional[str]='Diagnosis',
+    out_name: Optional[str]=''
+):
+    """
+    Run a pickled model performance assessment.
+    Generates figures and performance metrics.
+    """
+    console.print(
+        "[bold blue]Running pickled model evaluation...[/bold blue]"
+    )
+    
+    try:
+        # Setup logging
+        logger = setup_logging(log_level=log_level)
+
+        full_evaluation_manager(
+            model_path=model_path,
+            data_table_path=data_table_path,
+            output_folder=output_folder,
+            logger=logger,
+            target_variable=target_variable,
+            all_labels=['Healthy','CRC','BRC'],
+            pdf_title=out_name
+        )
+        
+    except Exception as e:
+        console.print(
+            f"[red]Error during model evaluation: {e}[/red]"
+        )
         sys.exit(1)
 
 
@@ -889,6 +1010,49 @@ For more information, see the full documentation.
     
     with open(output_dir / "README.md", "w") as f:
         f.write(readme_content)
+
+
+def load_pipeline_config(config_file_path: Path) -> PipelineConfig:
+    """
+    Handles loading of pipeline variables from the config.ini file.
+    """
+    # Initialize PipelineConfig
+    pipeline_config = PipelineConfig()
+    # Initialize config parser
+    config_elem = configparser.ConfigParser()
+    # Read the config.ini file
+    config_read = config_elem.read(config_file_path)
+    # Raise an error if the file was specified but not found/readable
+    if not config_read:
+        raise FileNotFoundError(
+            f"Configuration file not found or empty: {config_file_path}"
+        )
+    # Load configuration values
+    pipeline_config.base_dir = Path(config_elem['Paths'].get(
+        'BASE_DIR', pipeline_config.base_dir
+    ))
+    pipeline_config.bed_file = Path(config_elem['Paths'].get(
+        'BED_FILE', pipeline_config.bed_file
+    ))
+    pipeline_config.reference_fasta = Path(config_elem['Paths'].get(
+        'REFERENCE_FASTA', pipeline_config.reference_fasta
+    ))
+    pipeline_config.reference_gff = Path(config_elem['Paths'].get(
+        'REFERENCE_GFF', pipeline_config.reference_gff
+    ))
+    pipeline_config.bed_genes = Path(config_elem['Paths'].get(
+        'BED_GENES', pipeline_config.bed_genes
+    ))
+    pipeline_config.genome_sizes = Path(config_elem['Paths'].get(
+        'GENOME_SIZES', pipeline_config.genome_sizes
+    ))
+    pipeline_config.snpeff_dir = Path(config_elem['Paths'].get(
+        'SNPEFF_DIR', pipeline_config.snpeff_dir
+    ))
+    pipeline_config.genome_name = config_elem['Parameters'].get(
+        'GENOME_NAME', pipeline_config.genome_name
+    )
+    return pipeline_config
 
 
 def main():

@@ -2,6 +2,7 @@
 Main pipeline class for the SRA to Features Pipeline.
 """
 
+import asyncio
 import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -24,7 +25,10 @@ class Pipeline:
             config: Pipeline configuration
             logger: Structured logger instance
         """
+        # Load config data
         self.config = config
+
+        # Initialize logger and performance monitor
         self.logger = logger
         self.monitor = PerformanceMonitor(logger)
         
@@ -51,12 +55,11 @@ class Pipeline:
         """
         with PipelineLogger(self.logger, f"pipeline_sra_{sra_id}") as plog:
             plog.add_context(sra_id=sra_id)
-            
-            # Download FASTQ files
-            fastq_files = self._download_sra_data(sra_id)
-            
-            # Run pipeline on FASTQ files
-            return self._run_pipeline(sra_id, fastq_files)
+
+            return asyncio.run(self._run_sample(
+                sample_id=sra_id,
+                download_fastq=True
+            ))
     
     def run_fastq(self, fastq_files: List[Path]) -> FeatureSet:
         """
@@ -73,9 +76,45 @@ class Pipeline:
         
         with PipelineLogger(self.logger, f"pipeline_fastq_{sample_id}") as plog:
             plog.add_context(sample_id=sample_id, fastq_files=[str(f) for f in fastq_files])
-            
-            return self._run_pipeline(sample_id, fastq_files)
+
+            return asyncio.run(self._run_sample(
+                sample_id=sample_id,
+                download_fastq=False,
+                fq_files=fastq_files
+            ))
     
+    async def _run_sample(
+        self,
+        sample_id: str,
+        download_fastq: bool,
+        fq_files: List[Path] = []
+    ) -> FeatureSet:
+        """
+        Run the pipeline on an sample ID with asynchronous monitoring.
+        """
+        # Define csv_path for this run
+        self.monitor.csv_path = self.config.output_dir / sample_id / "performance.log"
+        # Make sure the directory exists
+        self.monitor.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        # Initialize csv file
+        self.monitor.init_csv()
+        # Disk usage tracking
+        self.monitor.set_disk_path(self.config.get_data_dir())
+        # Start performance monitoring
+        self.monitor.start_monitoring(section="global")
+        
+        if download_fastq:
+            # Download FASTQ files
+            fastq_files = await self.monitor.section(
+                "download_sra", self._download_sra_data, sample_id
+            )
+        else:
+            # Use given fastq files
+            fastq_files = fq_files
+        
+        # Run pipeline on FASTQ files
+        return await self._run_pipeline(sample_id, fastq_files)
+
     def run_batch(self, sra_ids: List[str], merge_vcfs: bool = True) -> List[FeatureSet]:
         """
         Run the pipeline on multiple SRA IDs with optional VCF merging.
@@ -150,34 +189,46 @@ class Pipeline:
                 log_error(self.logger, e, context={"sra_id": sra_id, "operation": "download"})
                 raise
     
-    def _run_pipeline(self, sample_id: str, fastq_files: List[Path]) -> FeatureSet:
+    async def _run_pipeline(self, sample_id: str, fastq_files: List[Path]) -> FeatureSet:
         """Run the complete pipeline workflow."""
         start_time = time.time()
         
         try:
             # Step 1: Alignment
-            bam_file = self._run_alignment(sample_id, fastq_files)
+            bam_file = await self.monitor.section(
+                "alignment", self._run_alignment, sample_id, fastq_files
+            )
             
             # Step 2: Variant Calling
-            vcf_file, snpeff_file = self._run_variant_calling(sample_id, bam_file)
+            vcf_file, snpeff_file = await self.monitor.section(
+                "variant_calling", self._run_variant_calling, sample_id, bam_file
+            )
 
             # Step 3: Quality Control
-            qc_results = self._run_quality_control(fastq_files, bam_file)
+            qc_results = await self.monitor.section(
+                "quality_control", self._run_quality_control, fastq_files, bam_file
+            )
             
             # Step 4: Feature Extraction
-            features = self._extract_features(sample_id, bam_file, vcf_file, snpeff_file)
+            features = await self.monitor.section(
+                "feature_extraction", self._extract_features, sample_id, bam_file, vcf_file, snpeff_file
+            )
             
             # Step 5: Create FeatureSet
-            feature_set = self._create_feature_set(
-                sample_id=sample_id,
-                features=features,
-                qc_results=qc_results,
-                processing_time=time.time() - start_time
+            feature_set = await self.monitor.section(
+                "create_feature_set", self._create_feature_set,
+                sample_id, features, qc_results, time.time() - start_time
             )
             
             # Step 6: Save results
-            self._save_results(sample_id, feature_set)
+            await self.monitor.section(
+                "save_results", self._save_results, sample_id, feature_set
+            )
             
+            # Stop performance monitoring and report peaks
+            await self.monitor.stop_monitoring()
+            self.monitor.report_peaks()
+
             return feature_set
             
         except Exception as e:

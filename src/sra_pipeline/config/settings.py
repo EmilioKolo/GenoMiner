@@ -13,8 +13,8 @@ class PipelineConfig(BaseSettings):
     """Configuration for the SRA to Features Pipeline."""
     
     # Base paths
-    base_dir: Path = Field(default=Path("/content"), description="Base directory for pipeline")
-    output_dir: Path = Field(default=Path("/content/data/output"), description="Output directory")
+    base_dir: Path = Field(default=Path("content"), description="Base directory for pipeline")
+    output_dir: Path = Field(default=Path("content/data/output"), description="Output directory")
     
     # Reference files
     reference_fasta: Optional[Path] = Field(default=None, description="Reference genome FASTA file")
@@ -28,7 +28,7 @@ class PipelineConfig(BaseSettings):
     snpeff_dir: Optional[Path] = Field(default=None, description="snpEff installation directory")
     
     # Parameters
-    genome_name: str = Field(default="custom_human", description="Genome name for snpEff")
+    genome_name: str = Field(default="custom", description="Genome name for snpEff")
     bin_size_gvs: int = Field(default=100000, description="Bin size for genomic variants")
     bin_size_cnv: int = Field(default=100000, description="Bin size for CNV analysis")
     threads: int = Field(default=1, description="Number of threads to use")

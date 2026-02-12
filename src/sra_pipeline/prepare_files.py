@@ -213,9 +213,9 @@ def patch_cnvpytor_genome_file():
 
     print("CNVpytor genome.py successfully patched.")
 
+    print("Setup complete. You can now run the sra_to_features_pipeline.")
     return 0
 
 
 if __name__ == "__main__":
     main()
-    print("Setup complete. You can now run the sra_to_features_pipeline.")

@@ -56,8 +56,8 @@ docs = [
 ]
 
 [project.scripts]
-sra-pipeline-setup = "prepare_files:main"
 sra-pipeline = "sra_pipeline.cli:main"
+sra-pipeline-setup = "sra_pipeline.prepare_files:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

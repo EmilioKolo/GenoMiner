@@ -9,7 +9,7 @@ echo "🚀 SRA to Features Pipeline - Development Installation"
 echo "======================================================"
 
 # Check if we're in the right directory
-if [ ! -f "pyproject.toml" ] || [ ! -f "setup.py" ]; then
+if [ ! -f "pyproject.toml" ]; then
     echo "❌ Error: Please run this script from the pipeline root directory"
     exit 1
 fi
@@ -62,20 +62,14 @@ if try_install "Editable with no build isolation" "pip install -e . --no-build-i
     exit 0
 fi
 
-# Method 3: Use setup.py directly
-if try_install "setup.py develop" "python setup.py develop"; then
-    echo "🎉 Installation completed successfully!"
-    exit 0
-fi
-
-# Method 4: Regular installation (not editable)
+# Method 3: Regular installation (not editable)
 if try_install "Regular installation" "pip install ."; then
     echo "🎉 Installation completed successfully!"
     echo "⚠️  Note: This is not an editable installation. Changes to source code won't be reflected."
     exit 0
 fi
 
-# Method 5: Try with conda if available
+# Method 4: Try with conda if available
 if command -v conda &> /dev/null; then
     echo "🐍 Conda detected, trying conda installation..."
     if try_install "Conda installation" "conda install -c conda-forge pip setuptools && pip install -e ."; then

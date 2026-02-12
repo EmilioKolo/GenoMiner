@@ -46,7 +46,7 @@ if __name__ == "__main__":
         entry_points={
             "console_scripts": [
                 "sra-pipeline=sra_pipeline.cli:main",
-                "sra-pipeline-setup=prepare_files:main",
+                "sra-pipeline-setup=sra_pipeline.prepare_files:main",
             ],
         },
         classifiers=[

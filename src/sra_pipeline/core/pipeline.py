@@ -155,19 +155,22 @@ class Pipeline:
         start_time = time.time()
         
         try:
-            # Step 1: Alignment
-            bam_file = self._run_alignment(sample_id, fastq_files)
+            # Step 1: Adapter trimming
+            trimmed_fastq = self._run_trimming(sample_id, fastq_files)
             
-            # Step 2: Variant Calling
+            # Step 2: Alignment using trimmed FASTQ
+            bam_file = self._run_alignment(sample_id, trimmed_fastq)
+            
+            # Step 3: Variant Calling
             vcf_file, snpeff_file = self._run_variant_calling(sample_id, bam_file)
 
-            # Step 3: Quality Control
-            qc_results = self._run_quality_control(fastq_files, bam_file)
+            # Step 4: Quality Control
+            qc_results = self._run_quality_control(fastq_files, bam_file, post_trimming_fastq=trimmed_fastq)
             
-            # Step 4: Feature Extraction
+            # Step 5: Feature Extraction
             features = self._extract_features(sample_id, bam_file, vcf_file, snpeff_file)
             
-            # Step 5: Create FeatureSet
+            # Step 6: Create FeatureSet
             feature_set = self._create_feature_set(
                 sample_id=sample_id,
                 features=features,
@@ -175,7 +178,7 @@ class Pipeline:
                 processing_time=time.time() - start_time
             )
             
-            # Step 6: Save results
+            # Step 7: Save results
             self._save_results(sample_id, feature_set)
             
             return feature_set
@@ -184,7 +187,7 @@ class Pipeline:
             log_error(self.logger, e, context={"sample_id": sample_id, "operation": "pipeline"})
             raise
     
-    def _run_quality_control(self, fastq_files: List[Path], bam_file: Path) -> Dict[str, Any]:
+    def _run_quality_control(self, fastq_files: List[Path], bam_file: Path|None, post_trimming_fastq: List[Path]|None = None) -> Dict[str, Any]:
         """Run quality control on FASTQ files."""
         with PipelineLogger(self.logger, "quality_control") as plog:
             plog.add_context(fastq_files=[str(f) for f in fastq_files])
@@ -194,7 +197,8 @@ class Pipeline:
                     fastq_files=fastq_files,
                     bam_file=bam_file,
                     output_dir=self.config.get_tmp_dir(),
-                    logger=self.logger
+                    logger=self.logger,
+                    post_trimming_fastq=post_trimming_fastq
                 )
                 
                 plog.log_progress("Quality control completed")
@@ -202,6 +206,24 @@ class Pipeline:
                 
             except Exception as e:
                 log_error(self.logger, e, context={"operation": "quality_control"})
+                raise
+    
+    def _run_trimming(self, sample_id: str, fastq_files: List[Path]) -> List[Path]:
+        with PipelineLogger(self.logger, f"trimming_{sample_id}") as plog:
+            plog.add_context(sample_id=sample_id, fastq_files=[str(f) for f in fastq_files])
+            try:
+                from . import trimming
+                trimmed = trimming.run_trimming(
+                    sample_id=sample_id,
+                    fastq_files=fastq_files,
+                    output_dir=self.config.get_data_dir() / "trimmed",
+                    logger=self.logger,
+                    threads=self.config.threads,
+                )
+                plog.log_progress(f"Trimming completed, {len(trimmed)} files")
+                return trimmed
+            except Exception as e:
+                log_error(self.logger, e, context={"sample_id": sample_id, "operation": "trimming"})
                 raise
     
     def _run_alignment(self, sample_id: str, fastq_files: List[Path]) -> Path:
@@ -213,7 +235,7 @@ class Pipeline:
                 bam_file = alignment.run_alignment(
                     sample_id=sample_id,
                     fastq_files=fastq_files,
-                    reference_fasta=self.config.reference_fasta,
+                    reference_fasta=Path(str(self.config.reference_fasta)),
                     output_dir=self.config.get_data_dir() / "bam",
                     threads=self.config.threads,
                     logger=self.logger
@@ -226,7 +248,7 @@ class Pipeline:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "alignment"})
                 raise
     
-    def _run_variant_calling(self, sample_id: str, bam_file: Path) -> Path:
+    def _run_variant_calling(self, sample_id: str, bam_file: Path) -> List[Path]:
         """Run variant calling on aligned BAM file."""
         with PipelineLogger(self.logger, f"variant_calling_{sample_id}") as plog:
             plog.add_context(sample_id=sample_id, bam_file=str(bam_file))
@@ -235,9 +257,9 @@ class Pipeline:
                 vcf_file, snpeff_file = variant_calling.run_variant_calling(
                     sample_id=sample_id,
                     bam_file=bam_file,
-                    reference_fasta=self.config.reference_fasta,
+                    reference_fasta=Path(str(self.config.reference_fasta)),
                     output_dir=self.config.get_data_dir() / "vcf",
-                    snpeff_dir=self.config.snpeff_dir,
+                    snpeff_dir=Path(str(self.config.snpeff_dir)),
                     genome_name=self.config.genome_name,
                     min_quality_score=self.config.min_quality_score,
                     min_coverage=self.config.min_coverage,
@@ -245,7 +267,7 @@ class Pipeline:
                 )
                 
                 plog.log_progress(f"Variant calling completed: {vcf_file}")
-                return vcf_file, snpeff_file
+                return [vcf_file, snpeff_file]
                 
             except Exception as e:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "variant_calling"})
@@ -262,12 +284,12 @@ class Pipeline:
                     bam_file=bam_file,
                     vcf_file=vcf_file,
                     snpeff_file=snpeff_file,
-                    reference_gff=self.config.reference_gff,
-                    bed_genes=self.config.bed_genes,
-                    genome_sizes=self.config.genome_sizes,
+                    reference_gff=Path(str(self.config.reference_gff)),
+                    bed_genes=Path(str(self.config.bed_genes)),
+                    genome_sizes=Path(str(self.config.genome_sizes)),
                     bin_size_gvs=self.config.bin_size_gvs,
                     bin_size_cnv=self.config.bin_size_cnv,
-                    output_dir=self.config.get_tmp_dir(),
+                    output_dir=Path(str(self.config.get_tmp_dir())),
                     logger=self.logger
                 )
                 

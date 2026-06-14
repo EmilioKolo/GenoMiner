@@ -26,6 +26,7 @@ class PipelineConfig(BaseSettings):
     # External tools
     kraken_db: Optional[Path] = Field(default=None, description="Kraken2 database directory")
     snpeff_dir: Optional[Path] = Field(default=None, description="snpEff installation directory")
+    trimmomatic_jar: Optional[Path] = Field(default=None, description="Path to Trimmomatic JAR file (if not in PATH)")
     
     # Parameters
     genome_name: str = Field(default="custom_human", description="Genome name for snpEff")

@@ -125,7 +125,8 @@ def _build_trimmomatic_se_cmd(
 ) -> List[str]:
     """Build command line for single-end Trimmomatic."""
     return [
-        "TrimmomaticSE",
+        "trimmomatic",
+        "SE",
         "-threads", str(threads),
         str(input_fastq),
         str(output_paired),
@@ -149,7 +150,8 @@ def _build_trimmomatic_pe_cmd(
 ) -> List[str]:
     """Build command line for paired-end Trimmomatic."""
     return [
-        "TrimmomaticPE",
+        "trimmomatic",
+        "PE",
         "-threads", str(threads),
         str(forward_input),
         str(reverse_input),

@@ -3,7 +3,7 @@ Quality control functionality for genomic data.
 """
 
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from ..utils import log_command
 import gzip
 import numpy as np
@@ -16,9 +16,10 @@ import zipfile
 
 def run_quality_control(
     fastq_files: List[Path],
-    bam_file: Path,
+    bam_file: Path|None,
     output_dir: Path,
-    logger: structlog.BoundLogger
+    logger: structlog.BoundLogger,
+    post_trimming_fastq: Optional[List[Path]] = None,
 ) -> Dict[str, Any]:
     """
     Run quality control on FASTQ files.
@@ -40,11 +41,21 @@ def run_quality_control(
     
     qc_results = {}
     
-    # Run FastQC
-    qc_results.update(_run_fastqc(fastq_files, output_dir, logger))
+    # Initial FastQC on raw FASTQ
+    qc_results.update(_run_fastqc(fastq_files, output_dir / "fastqc_raw", logger))
+    
+    # If post-trimming FASTQ files are provided, run FastQC on them
+    if post_trimming_fastq:
+        post_trim_dir = output_dir / "fastqc_trimmed"
+        post_trim_dir.mkdir(parents=True, exist_ok=True)
+        trimmed_qc = _run_fastqc(post_trimming_fastq, post_trim_dir, logger)
+        # Store trimmed metrics under a separate key
+        qc_results["post_trimming"] = trimmed_qc
+        logger.info("Post-trimming FastQC completed", trimmed_files=[str(f) for f in post_trimming_fastq])
     
     # Calculate basic statistics
-    qc_results.update(_calculate_bam_stats(bam_file, logger))
+    if bam_file is not None:
+        qc_results.update(_calculate_bam_stats(bam_file, logger))
     
     # Calculate quality scores
     qc_results.update(_calculate_quality_scores(qc_results, logger))
@@ -73,10 +84,10 @@ def _run_fastqc(
                 fastq_files=[str(f) for f in fastq_files])
     
     # Initialize the list of quality metrics
-    fastqc_results: list[dict[str: Any]] = []
+    fastqc_results: list[dict[str, Any]] = []
     # Go through FASTQ files
     for fastq_file in fastq_files:
-        curr_fastq_results: dict[str: Any] = {}
+        curr_fastq_results: dict[str, Any] = {}
         if not fastq_file.exists():
             logger.error("FASTQ file not found.", file=fastq_file)
             continue
@@ -326,7 +337,7 @@ def _calculate_quality_scores(
 def _extract_fastqc_metrics(
     report_path: Path,
     logger: structlog.BoundLogger
-) -> dict[str: Any]:
+) -> dict[str, Any]:
     """Extract quality metrics from the FastQC report."""
     # Initialize metrics dictionary
     file_metrics = {
@@ -641,10 +652,10 @@ def _process_module_data(
 def _process_fastq_basic(
     fastq_file: Path,
     logger: structlog.BoundLogger
-) -> dict[str:int|float]:
+) -> dict[str, int|float]:
     """Processes a FASTQ file to calculate basic metrics."""
     # Initialize dictionary to return
-    dict_out: dict[str:int|float] = {}
+    dict_out: dict[str, int|float] = {}
     # Initialize values
     total_reads = 0
     total_bases = 0
@@ -845,12 +856,12 @@ def _define_output_dict(
 def get_bam_statistics(
     bam_file_path: Path,
     logger: structlog.BoundLogger
-) -> dict[str:int|float]:
+) -> dict[str, int|float]:
     """Extracts statistics from a BAM file including mapped reads, mapping
     percentage, mean coverage, and coverage standard deviation."""
     try:
         # Open the BAM file with pysam
-        bam_file = pysam.AlignmentFile(bam_file_path, "rb")
+        bam_file = pysam.AlignmentFile(str(bam_file_path), "rb")
         # Calculate mapped reads and mapping percentage
         total_reads: int = bam_file.mapped + bam_file.unmapped
         mapped_reads: int = bam_file.mapped
@@ -875,7 +886,7 @@ def get_bam_statistics(
         # Calculate standard deviation
         if n_values > 0:
             # Reopen the file
-            bam_file = pysam.AlignmentFile(bam_file_path, "rb")
+            bam_file = pysam.AlignmentFile(str(bam_file_path), "rb")
             sum_of_squared_diff = 0
             
             for pileupcolumn in bam_file.pileup():
@@ -917,7 +928,7 @@ def avg_list_val(
     avg_key:str,
     total:int|float,
     logger: structlog.BoundLogger
-) -> list[dict[str:int|float|str]]:
+) -> list[dict[str, int|float|str]]:
     """Averages values from a list of dictionaries inside a list of 
     dictionaries."""
     # Initialise return value
@@ -952,7 +963,7 @@ def sum_list_val(
     key_val:str,
     key_id:str,
     logger: structlog.BoundLogger
-) -> list[dict[str:int|float|str]]:
+) -> list[dict[str, int|float|str]]:
     """Sums values from a list of dictionaries inside a list of 
     dictionaries."""
     # Initialise return value
@@ -1111,7 +1122,7 @@ def _gc_eval(
         curr_gc_str = curr_dict['gc_content']
         # Check for range string
         if '-' in str(curr_gc_str):
-            curr_gc = str_to_range(curr_gc_str)
+            curr_gc = sum(str_to_range(curr_gc_str))/2.0
         else:
             curr_gc = int(curr_gc_str)
         curr_count = curr_dict['count']
@@ -1415,7 +1426,7 @@ def str_to_range(range_str: str) -> List[int|float]:
     an initial and end value.
     Splits by middle dash ('-')."""
     # Initialize the output tuple
-    out_l = [-1, -1]
+    out_l:List[int|float] = [-1, -1]
     l_split = range_str.split('-')
     out_l[0] = float(l_split[0])
     out_l[1] = float(l_split[-1])

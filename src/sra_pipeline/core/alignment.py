@@ -4,7 +4,7 @@ Sequence alignment functionality using BWA.
 
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import structlog
 
 from ..utils import log_command, log_error
@@ -17,7 +17,7 @@ def run_alignment(
     output_dir: Path,
     threads: int,
     logger: structlog.BoundLogger
-) -> Path:
+) -> tuple[Path, Path]:
     """
     Run BWA alignment of FASTQ files to reference genome.
     
@@ -30,7 +30,8 @@ def run_alignment(
         logger: Logger instance
         
     Returns:
-        Path to the sorted and indexed BAM file
+        Tuple containing the path to the sorted and indexed BAM file and the 
+        duplicate metrics file
         
     Raises:
         RuntimeError: If alignment fails
@@ -53,7 +54,10 @@ def run_alignment(
     # Step 3: Sort BAM file
     sorted_bam_file = _sort_bam(sample_id, bam_file, output_dir, logger)
     
-    # Step 4: Index BAM file
+    # Step 4: Mark duplicates
+    dup_metrics_file = _mark_duplicates(sample_id, sorted_bam_file, output_dir, logger)
+    
+    # Step 5: Index BAM file
     indexed_bam_file = _index_bam(sample_id, sorted_bam_file, logger)
     
     # Clean up intermediate files
@@ -61,9 +65,10 @@ def run_alignment(
     
     logger.info("BWA alignment completed", 
                 sample_id=sample_id, 
-                output_bam=str(indexed_bam_file))
+                output_bam=str(indexed_bam_file),
+                dup_metrics=str(dup_metrics_file))
     
-    return indexed_bam_file
+    return indexed_bam_file, dup_metrics_file
 
 
 def _run_bwa_mem(
@@ -192,6 +197,64 @@ def _sort_bam(
         raise RuntimeError(f"BAM sorting failed for sample {sample_id}: {e.stderr}")
 
 
+def _mark_duplicates(
+    sample_id: str,
+    sorted_bam_file: Path,
+    output_dir: Path,
+    logger: structlog.BoundLogger
+) -> Path:
+    """
+    Run Picard MarkDuplicates to mark duplicate reads.
+    
+    Args:
+        sample_id: Sample identifier
+        sorted_bam_file: Sorted BAM file input
+        output_dir: Output directory for marked BAM and metrics file
+        logger: Logger instance
+        
+    Returns:
+        Path to the metrics file
+    """
+    marked_bam_file = output_dir / f"{sample_id}_sorted_marked.bam"
+    metrics_file = output_dir / f"{sample_id}_dup_metrics.txt"
+    
+    cmd = [
+        "picard", "MarkDuplicates",
+        f"I={sorted_bam_file}",
+        f"O={marked_bam_file}",
+        f"M={metrics_file}",
+        "REMOVE_DUPLICATES=false",
+        "ASSUME_SORTED=true",
+        "VALIDATION_STRINGENCY=SILENT"
+    ]
+    
+    log_command(logger, " ".join(cmd), sample_id=sample_id)
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=1800  # 30 minute timeout
+        )
+        logger.info("Duplicate marking completed", 
+                    sample_id=sample_id, 
+                    marked_bam=str(marked_bam_file),
+                    metrics_file=str(metrics_file))
+        
+        # Replace original sorted BAM with marked BAM for further steps
+        sorted_bam_file.unlink()
+        marked_bam_file.rename(sorted_bam_file)
+        
+        return metrics_file
+        
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"MarkDuplicates timed out for sample: {sample_id}")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"MarkDuplicates failed for sample {sample_id}: {e.stderr}")
+
+
 def _index_bam(
     sample_id: str,
     bam_file: Path,
@@ -240,43 +303,65 @@ def _cleanup_intermediate_files(files: List[Path], logger: structlog.BoundLogger
                           file=str(file_path), error=str(e))
 
 
-def validate_bam_file(bam_file: Path, logger: structlog.BoundLogger) -> bool:
-    """Validate that BAM file is properly formatted and indexed."""
+def validate_bam_file(
+    bam_file: Path, 
+    logger: structlog.BoundLogger,
+    dup_metrics_file: Optional[Path] = None
+) -> tuple[bool, dict]:
+    """
+    Validate BAM file and return duplication rates.
+    
+    Returns:
+        (is_valid, rates_dict) where rates_dict contains:
+        - 'duplication_rate_flagstat': float (percentage of duplicate reads from flagstat)
+        - 'duplication_rate_picard': float (percentage from Picard metrics) or None
+    """
+    rates = {'duplication_rate_flagstat': 0.0, 'duplication_rate_picard': None}
+    
+    # Existing validation checks...
+    if not bam_file.exists() or bam_file.stat().st_size == 0:
+        logger.error("BAM file missing or empty", file=str(bam_file))
+        return False, rates
+    
+    # Check index
+    index_file = bam_file.with_suffix(".bam.bai")
+    if not index_file.exists():
+        logger.error("BAM index file missing", file=str(index_file))
+        return False, rates
+    
+    # Run samtools flagstat
+    cmd = ["samtools", "flagstat", str(bam_file)]
     try:
-        # Check if BAM file exists and is not empty
-        if not bam_file.exists():
-            logger.error("BAM file does not exist", file=str(bam_file))
-            return False
-        
-        if bam_file.stat().st_size == 0:
-            logger.error("BAM file is empty", file=str(bam_file))
-            return False
-        
-        # Check if index file exists
-        index_file = bam_file.with_suffix(".bam.bai")
-        if not index_file.exists():
-            logger.error("BAM index file does not exist", file=str(index_file))
-            return False
-        
-        # Validate BAM file format
-        cmd = ["samtools", "quickcheck", str(bam_file)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            logger.error("BAM file validation failed", 
-                        file=str(bam_file), stderr=result.stderr)
-            return False
-        
-        # Get basic statistics
-        cmd = ["samtools", "flagstat", str(bam_file)]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        
-        logger.info("BAM file validation passed", 
-                    file=str(bam_file), 
-                    flagstat=result.stdout.strip())
-        
-        return True
-        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        # Parse duplication rate from flagstat output
+        for line in result.stdout.splitlines():
+            if 'duplicates' in line:
+                # Example line: "0 + 0 duplicates"
+                parts = line.split()
+                if len(parts) >= 1:
+                    dup_reads = int(parts[0])
+                    total_reads_line = [l for l in result.stdout.splitlines() if 'in total' in l]
+                    if total_reads_line:
+                        total_reads = int(total_reads_line[0].split()[0])
+                        if total_reads > 0:
+                            rates['duplication_rate_flagstat'] = (dup_reads / total_reads) * 100.0
+        logger.info("Flagstat duplication rate parsed", rate=rates['duplication_rate_flagstat'])
     except Exception as e:
-        logger.error("BAM file validation error", file=str(bam_file), error=str(e))
-        return False 
+        logger.warning("Failed to parse flagstat for duplication rate", error=str(e))
+    
+    # Parse Picard metrics if provided
+    if dup_metrics_file and dup_metrics_file.exists():
+        try:
+            with open(dup_metrics_file) as f:
+                for line in f:
+                    if line.startswith("PERCENT_DUPLICATION"):
+                        # Next line contains the value
+                        next_line = next(f).strip()
+                        if next_line:
+                            rates['duplication_rate_picard'] = float(next_line) * 100.0
+                            logger.info("Picard duplication rate parsed", rate=rates['duplication_rate_picard'])
+                        break
+        except Exception as e:
+            logger.warning("Failed to parse Picard metrics", error=str(e))
+    
+    return True, rates

@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 from ..utils import log_command
 import gzip
+import numpy as np
 import pandas as pd
-import statistics
 import structlog
 import subprocess
 import sys
@@ -91,63 +91,68 @@ def _extract_fragment_lengths(
     bam_file: Path,
     logger: structlog.BoundLogger,
     min_size: int = 0,
-    max_size: int = 1000
+    max_size: int = 1000,
+    short_threshold: int = 150,
+    long_threshold: int = 250,
 ) -> FragmentLengthStats:
     """Extract fragment length statistics from BAM file."""
-    logger.info("Extracting fragment length statistics", 
-                sample_id=sample_id)
+    logger.info("Extracting fragment length statistics", sample_id=sample_id)
 
     # First command: samtools view
     cmd1 = ["samtools", "view", "-f", "0x2", str(bam_file)]
-
     log_command(logger, " ".join(cmd1), sample_id=sample_id)
-
     p1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE)
 
     # Second command: awk
     awk_command = f'{{if ($9>{min_size} && $9<{max_size}) print $9}}'
     cmd2 = ['awk', awk_command]
-
     log_command(logger, " ".join(cmd2), sample_id=sample_id)
-
     p2 = subprocess.Popen(cmd2, stdin=p1.stdout, stdout=subprocess.PIPE)
     p1.stdout.close()
     
     # Get the output of the second command
     output, _ = p2.communicate()
-
-    if not _ is None:
-        _decoded = _.decode('utf-8')
-        logger.warning(f'_: {_decoded}', sample_id=sample_id)
-
-    # Parse the output to get fragment lengths
-    fragment_lengths = output.decode('utf-8').strip().split('\n')
-    # Convert to integers
-    fragment_lengths = [int(s) for s in fragment_lengths if s!='']
+    fragment_lengths = [int(s) for s in output.decode('utf-8').strip().split('\n') if s]
 
     # Check if there are any fragment lengths
     if not fragment_lengths:
         logger.warning("No fragment lengths found", sample_id=sample_id)
         return FragmentLengthStats(
-            mean=0.0,
-            median=0.0,
-            std=0.0,
-            min=0.0,
-            max=0.0,
-            count=0
+            mean=0.0, median=0.0, std=0.0, min=0.0, max=0.0, count=0,
+            percentile_10=0.0, percentile_25=0.0, percentile_75=0.0, percentile_90=0.0,
+            short_fragment_ratio=0.0, long_fragment_ratio=0.0, fragment_length_entropy=0.0
         )
     
-    logger.info("Fragment lengths extracted",
-                sample_id=sample_id,
-                bam_file=str(bam_file))
-    # Calculate and return required stats
+    lengths = np.array(fragment_lengths)
+    
+    percentiles = np.percentile(lengths, [10, 25, 75, 90])
+    
+    short_count = sum(1 for l in fragment_lengths if l < short_threshold)
+    long_count = sum(1 for l in fragment_lengths if l > long_threshold)
+    total = len(fragment_lengths)
+    short_ratio = short_count / total
+    long_ratio = long_count / total
+    
+    bin_edges = np.arange(min(fragment_lengths), max(fragment_lengths) + 2)
+    hist, _ = np.histogram(fragment_lengths, bins=bin_edges)
+    probs = hist / total
+    probs = probs[probs > 0]
+    entropy = -np.sum(probs * np.log2(probs))
+    
     return FragmentLengthStats(
-        mean=statistics.mean(fragment_lengths),
-        median=statistics.median(fragment_lengths),
-        std=statistics.stdev(fragment_lengths),
-        min=min(fragment_lengths),
-        max=max(fragment_lengths),
-        count=len(fragment_lengths)
+        mean=float(np.mean(lengths)),
+        median=float(np.median(lengths)),
+        std=float(np.std(lengths)),
+        min=float(np.min(lengths)),
+        max=float(np.max(lengths)),
+        count=total,
+        percentile_10=float(percentiles[0]),
+        percentile_25=float(percentiles[1]),
+        percentile_75=float(percentiles[2]),
+        percentile_90=float(percentiles[3]),
+        short_fragment_ratio=short_ratio,
+        long_fragment_ratio=long_ratio,
+        fragment_length_entropy=entropy
     )
 
 

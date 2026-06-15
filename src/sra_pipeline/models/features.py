@@ -17,13 +17,31 @@ class FragmentLengthStats(BaseModel):
     max: float = Field(description="Maximum fragment length")
     count: int = Field(description="Number of fragments analyzed")
     
-    @field_validator('mean', 'median', 'std', 'min', 'max', 'count')
+    # New fields for advanced fragmentomics
+    percentile_10: float = Field(default=0.0, description="10th percentile fragment length")
+    percentile_25: float = Field(default=0.0, description="25th percentile fragment length")
+    percentile_75: float = Field(default=0.0, description="75th percentile fragment length")
+    percentile_90: float = Field(default=0.0, description="90th percentile fragment length")
+    short_fragment_ratio: float = Field(default=0.0, description="Proportion of fragments <150 bp")
+    long_fragment_ratio: float = Field(default=0.0, description="Proportion of fragments >250 bp")
+    fragment_length_entropy: float = Field(default=0.0, description="Shannon entropy of fragment length distribution")
+    
+    @field_validator('mean', 'median', 'std', 'min', 'max', 'count',
+                     'percentile_10', 'percentile_25', 'percentile_75', 'percentile_90',
+                     'short_fragment_ratio', 'long_fragment_ratio', 'fragment_length_entropy')
     @classmethod
     def validate_positive(cls, v):
         """Validate that length statistics are positive.
         Count can be positive for cases with no fragment length data."""
         if v < 0:
             raise ValueError("Fragment length statistics must be non-negative")
+        return v
+    
+    @field_validator('short_fragment_ratio', 'long_fragment_ratio')
+    @classmethod
+    def validate_ratio_range(cls, v):
+        if not 0 <= v <= 1:
+            raise ValueError("Fragment ratios must be between 0 and 1")
         return v
 
 

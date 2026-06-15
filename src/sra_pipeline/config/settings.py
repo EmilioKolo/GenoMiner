@@ -2,7 +2,6 @@
 Configuration settings for the SRA to Features Pipeline.
 """
 
-import os
 from pathlib import Path
 from typing import Optional, List
 from pydantic import Field, field_validator
@@ -64,6 +63,12 @@ class PipelineConfig(BaseSettings):
     min_quality_score: int = Field(default=20, description="Minimum quality score for variants")
     min_coverage: int = Field(default=10, description="Minimum coverage for variant calling")
     
+    # Variant calling options
+    variant_caller: str = Field(default="bcftools", description="Variant caller: 'bcftools' or 'gatk'")
+    known_sites_vcf: Optional[Path] = Field(default=None, description="Known sites VCF (e.g., dbSNP + 1000G) for BQSR")
+    panel_of_normals: Optional[Path] = Field(default=None, description="Panel of normals VCF for Mutect2")
+    annovar_db: Optional[Path] = Field(default=None, description="ANNOVAR database directory")
+
     @field_validator('base_dir', 'output_dir', 'reference_fasta', 'reference_gff', 
                     'bed_file', 'bed_genes', 'genome_sizes', 'kraken_db', 'snpeff_dir')
     @classmethod
@@ -170,6 +175,13 @@ class PipelineConfig(BaseSettings):
             "bwa", "samtools", "bcftools", "bedtools", 
             "fastq-dump", "tabix", "bgzip", "java"
         ]
+
+        # Validate GATK-specific requirements if selected
+        if self.variant_caller == "gatk":
+            if not self.known_sites_vcf or not self.known_sites_vcf.exists():
+                errors.append(f"known_sites_vcf required for GATK: {self.known_sites_vcf}")
+            if not self.annovar_db or not self.annovar_db.exists():
+                errors.append(f"annovar_db required for GATK: {self.annovar_db}")
         
         for tool in required_tools:
             if not self._check_tool_available(tool):

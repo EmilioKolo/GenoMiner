@@ -342,7 +342,8 @@ class Pipeline:
                     bin_size_gvs=self.config.bin_size_gvs,
                     bin_size_cnv=self.config.bin_size_cnv,
                     output_dir=Path(str(self.config.get_tmp_dir())),
-                    logger=self.logger
+                    logger=self.logger,
+                    centromere_bed=self.config.centromere_bed,
                 )
                 
                 plog.log_progress("Feature extraction completed")
@@ -383,7 +384,12 @@ class Pipeline:
                 quality_metrics=quality_metrics,
                 metadata=features.get("metadata", {}),
                 processing_time=processing_time,
-                pipeline_version="1.0.0"
+                pipeline_version="1.0.0",
+                cnv_burden=features.get("cnv_burden", 0.0),
+                amplification_burden=features.get("amplification_burden", 0.0),
+                deletion_burden=features.get("deletion_burden", 0.0),
+                cnv_amplitude=features.get("cnv_amplitude", 0.0),
+                chromosome_arm_cnvs=features.get("chromosome_arm_cnvs", [])
             )
             
             return feature_set

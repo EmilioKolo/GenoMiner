@@ -10,7 +10,8 @@ import structlog
 from ..config.settings import PipelineConfig
 from ..models.features import FeatureSet, QualityMetrics
 from ..utils import PipelineLogger, PerformanceMonitor, log_command, log_error
-from . import download, alignment, variant_calling, feature_extraction, quality_control
+from . import download, alignment, variant_calling, feature_extraction, quality_control, variant_calling
+from . import gatk_variant_calling as gatk
 
 
 class Pipeline:
@@ -253,26 +254,72 @@ class Pipeline:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "alignment"})
                 raise
     
-    def _run_variant_calling(self, sample_id: str, bam_file: Path) -> List[Path]:
-        """Run variant calling on aligned BAM file."""
+    def _run_variant_calling(self, sample_id: str, bam_file: Path) -> tuple[Path, Path]:
         with PipelineLogger(self.logger, f"variant_calling_{sample_id}") as plog:
             plog.add_context(sample_id=sample_id, bam_file=str(bam_file))
             
             try:
-                vcf_file, snpeff_file = variant_calling.run_variant_calling(
-                    sample_id=sample_id,
-                    bam_file=bam_file,
-                    reference_fasta=Path(str(self.config.reference_fasta)),
-                    output_dir=self.config.get_data_dir() / "vcf",
-                    snpeff_dir=Path(str(self.config.snpeff_dir)),
-                    genome_name=self.config.genome_name,
-                    min_quality_score=self.config.min_quality_score,
-                    min_coverage=self.config.min_coverage,
-                    logger=self.logger
-                )
+                if self.config.variant_caller == "bcftools":
+                    vcf_file, snpeff_file = variant_calling.run_variant_calling(
+                        sample_id=sample_id,
+                        bam_file=bam_file,
+                        reference_fasta=self.config.reference_fasta,
+                        output_dir=self.config.get_data_dir() / "vcf",
+                        snpeff_dir=self.config.snpeff_dir,
+                        genome_name=self.config.genome_name,
+                        min_quality_score=self.config.min_quality_score,
+                        min_coverage=self.config.min_coverage,
+                        logger=self.logger
+                    )
+                elif self.config.variant_caller == "gatk":
+                    if self.config.known_sites_vcf:
+                        bam_file = gatk.run_bqsr(
+                            sample_id=sample_id,
+                            bam_file=bam_file,
+                            reference_fasta=self.config.reference_fasta,
+                            known_sites_vcf=self.config.known_sites_vcf,
+                            output_dir=self.config.get_data_dir() / "vcf" / "bqsr",
+                            logger=self.logger
+                        )
+                    
+                    gvcf = gatk.run_haplotypecaller_gvcf(
+                        sample_id=sample_id,
+                        bam_file=bam_file,
+                        reference_fasta=self.config.reference_fasta,
+                        output_dir=self.config.get_data_dir() / "vcf",
+                        logger=self.logger
+                    )
+                    
+                    vcf_file = gatk.run_joint_genotyping(
+                        gvcf_files=[gvcf],
+                        reference_fasta=self.config.reference_fasta,
+                        output_dir=self.config.get_data_dir() / "vcf",
+                        logger=self.logger
+                    )
+                    
+                    filtered_vcf = gatk.apply_variant_filtering(
+                        sample_id=sample_id,
+                        vcf_file=vcf_file,
+                        output_dir=self.config.get_data_dir() / "vcf",
+                        logger=self.logger,
+                        use_vqsr=False
+                    )
+                    
+                    annotated_vcf = gatk.run_annovar(
+                        sample_id=sample_id,
+                        vcf_file=filtered_vcf,
+                        annovar_db=self.config.annovar_db,
+                        output_dir=self.config.get_data_dir() / "vcf",
+                        logger=self.logger
+                    )
+                    
+                    vcf_file = filtered_vcf
+                    snpeff_file = annotated_vcf
+                else:
+                    raise ValueError(f"Unknown variant_caller: {self.config.variant_caller}")
                 
                 plog.log_progress(f"Variant calling completed: {vcf_file}")
-                return [vcf_file, snpeff_file]
+                return vcf_file, snpeff_file
                 
             except Exception as e:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "variant_calling"})

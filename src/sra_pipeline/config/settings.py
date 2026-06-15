@@ -21,7 +21,8 @@ class PipelineConfig(BaseSettings):
     bed_file: Path = Field(default=Path("regions.bed"), description="BED file with regions of interest")
     bed_genes: Optional[Path] = Field(default=None, description="BED file with gene regions")
     genome_sizes: Optional[Path] = Field(default=None, description="Genome sizes file")
-    
+    centromere_bed: Optional[Path] = Field(default=None, description="BED file with centromere positions (for CNV arm assignment)")
+
     # External tools
     kraken_db: Optional[Path] = Field(default=None, description="Kraken2 database directory")
     snpeff_dir: Optional[Path] = Field(default=None, description="snpEff installation directory")

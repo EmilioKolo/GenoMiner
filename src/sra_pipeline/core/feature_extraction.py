@@ -2,8 +2,9 @@
 Feature extraction functionality for genomic data.
 """
 
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from ..utils import log_command
 import gzip
 import numpy as np
@@ -14,6 +15,7 @@ import sys
 import tempfile
 
 from ..models.features import (
+    ChromosomeArmCNV,
     FragmentLengthStats, 
     GenomicBin, 
     GeneVariantStats, 
@@ -32,7 +34,8 @@ def extract_features(
     bin_size_gvs: int,
     bin_size_cnv: int,
     output_dir: Path,
-    logger: structlog.BoundLogger
+    logger: structlog.BoundLogger,
+    centromere_bed: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Extract genomic features from aligned and variant-called data.
@@ -69,7 +72,23 @@ def extract_features(
     features["gene_stats"] = _extract_gene_variants(sample_id, snpeff_file, bed_genes, reference_gff, logger)
     
     # Extract copy number variations
-    features["cnv_regions"] = _extract_cnv_regions(sample_id, bam_file, bin_size_cnv, logger)
+    cnv_regions = _extract_cnv_regions(sample_id, bam_file, bin_size_cnv, logger)
+    features["cnv_regions"] = cnv_regions
+    
+    # Compute CNV summary statistics
+    (cnv_burden, amp_burden, del_burden, cnv_amp) = _extract_cnv_summary_features(cnv_regions, logger)
+    features["cnv_burden"] = cnv_burden
+    features["amplification_burden"] = amp_burden
+    features["deletion_burden"] = del_burden
+    features["cnv_amplitude"] = cnv_amp
+    
+    # Compute chromosome-arm CNVs (requires centromere BED)
+    if centromere_bed and centromere_bed.exists():
+        arm_cnvs = _extract_chromosome_arm_cnvs(cnv_regions, centromere_bed, logger)
+        features["chromosome_arm_cnvs"] = arm_cnvs
+    else:
+        logger.warning("No centromere BED file provided; skipping chromosome‑arm CNV extraction")
+        features["chromosome_arm_cnvs"] = []
     
     # Add metadata
     features["metadata"] = {
@@ -137,7 +156,7 @@ def _extract_fragment_lengths(
     hist, _ = np.histogram(fragment_lengths, bins=bin_edges)
     probs = hist / total
     probs = probs[probs > 0]
-    entropy = -np.sum(probs * np.log2(probs))
+    entropy = float(-np.sum(probs * np.log2(probs)))
     
     return FragmentLengthStats(
         mean=float(np.mean(lengths)),
@@ -508,6 +527,132 @@ def _extract_ann(info_field:list[str]) -> str:
             return field.split('ANN=')[1]
     return ""
 
+def _extract_chromosome_arm_cnvs(
+    cnv_regions: List[CNVRegion],
+    centromere_bed: Path,
+    logger: structlog.BoundLogger
+) -> List[ChromosomeArmCNV]:
+    """
+    Group CNV bins by chromosome arm using centromere positions from a BED file.
+    
+    Args:
+        cnv_regions: List of CNVRegion objects
+        centromere_bed: BED file with centromere coordinates (0-based start, end)
+        logger: Logger instance
+    
+    Returns:
+        List of ChromosomeArmCNV objects
+    """
+    
+    if not centromere_bed or not centromere_bed.exists():
+        logger.warning("Centromere BED file not provided or does not exist. Skipping chromosome-arm CNV extraction.")
+        return []
+    
+    # Load centromere boundaries: for each chromosome, the start of the q arm.
+    centromeres = {}
+    with open(centromere_bed) as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split('\t')
+            if len(parts) < 3:
+                continue
+            chrom = parts[0]
+            start = int(parts[1])
+            end = int(parts[2])
+            # Use the midpoint of the centromere BED entry.
+            midpoint = (start + end) // 2
+            centromeres[chrom] = midpoint
+            logger.debug(f"Centromere for {chrom}: {midpoint}")
+    
+    # Group bins by chromosome and arm
+    arm_data = defaultdict(list)
+    for region in cnv_regions:
+        chrom = region.chromosome
+        if chrom not in centromeres:
+            logger.warning(f"No centromere position for chromosome {chrom}, skipping arm assignment for this region")
+            continue
+        cent_pos = centromeres[chrom]
+        # Use midpoint of the bin to decide arm
+        bin_mid = (region.start + region.end) // 2
+        arm = 'p' if bin_mid < cent_pos else 'q'
+        arm_key = f"{chrom}:{arm}"
+        # Skip invalid log2_ratio values
+        if np.isinf(region.log2_ratio) or np.isnan(region.log2_ratio):
+            logger.debug(f"Skipping region with invalid log2_ratio for arm {arm_key}")
+            continue
+        arm_data[arm_key].append(region.log2_ratio)
+    
+    # Compute per-arm summary
+    arm_cnvs = []
+    for arm_key, ratios in arm_data.items():
+        chrom, arm = arm_key.split(':')
+        if not ratios:
+            mean_ratio = 0.0
+        else:
+            mean_ratio = np.mean(ratios)
+        
+        if mean_ratio > 0.3:
+            call = 'gain'
+        elif mean_ratio < -0.3:
+            call = 'loss'
+        else:
+            call = 'neutral'
+        
+        arm_cnvs.append(ChromosomeArmCNV(
+            chromosome=chrom,
+            arm=arm,
+            mean_log2_ratio=float(mean_ratio),
+            call=call
+        ))
+    
+    logger.info(f"Chromosome-arm CNV summary: {len(arm_cnvs)} arms processed")
+    return arm_cnvs
+
+def _extract_cnv_summary_features(
+    cnv_regions: List[CNVRegion],
+    logger: structlog.BoundLogger
+) -> tuple[float, float, float, float]:
+    """
+    Compute CNV burden and amplitude from CNV regions.
+    
+    Args:
+        cnv_regions: List of CNVRegion objects
+        logger: Logger instance
+    
+    Returns:
+        Tuple of (cnv_burden, amplification_burden, deletion_burden, cnv_amplitude)
+    """
+    if not cnv_regions:
+        return 0.0, 0.0, 0.0, 0.0
+    
+    amplification = 0
+    deletion = 0
+    total_abs_log2 = 0.0
+    n_valid = 0
+    
+    for region in cnv_regions:
+        if np.isinf(region.log2_ratio) or np.isnan(region.log2_ratio):
+            logger.debug(f"Skipping CNV region with invalid log2_ratio: {region.log2_ratio}")
+            continue
+        n_valid += 1
+        abs_val = abs(region.log2_ratio)
+        total_abs_log2 += abs_val
+        if region.log2_ratio > 0.3:
+            amplification += 1
+        elif region.log2_ratio < -0.3:
+            deletion += 1
+    
+    if n_valid == 0:
+        logger.warning("No valid CNV regions with finite log2_ratio found")
+        return 0.0, 0.0, 0.0, 0.0
+    
+    burden = amplification + deletion
+    amplitude = total_abs_log2 / n_valid
+    logger.info(f"CNV summary: burden={burden}, amplifications={amplification}, "
+                f"deletions={deletion}, amplitude={amplitude:.4f}")
+    return float(burden), float(amplification), float(deletion), amplitude
+
 def _run_cnvpytor(
     sample_id: str,
     bam_file: Path,
@@ -634,9 +779,11 @@ def _read_cnvpytor_out(
         start: int = int(start_end[0])
         end: int = int(start_end[1])
         # Define copy number and confidence
-        copy_number: float = float(call[3]) # read depth normalized to average depth
+        copy_number: float = float(call[3])  # read depth normalized to average depth
+        # Compute log2 ratio
+        log2_ratio = np.log2(copy_number / 2.0) if copy_number > 0 else -np.inf
         if float(call[6]) <= 1.0:
-            confidence: float = 1.0 - float(call[6]) # 1 - p-value (e-val3)
+            confidence: float = 1.0 - float(call[6])  # 1 - p-value (e-val3)
         else:
             confidence: float = 0.0
         cnv_regions.append(CNVRegion(
@@ -644,6 +791,7 @@ def _read_cnvpytor_out(
             start=start,
             end=end,
             copy_number=copy_number,
+            log2_ratio=log2_ratio,
             confidence=confidence,
             type=cnv_type
         ))

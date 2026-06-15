@@ -118,6 +118,7 @@ class CNVRegion(BaseModel):
     start: int = Field(description="Start position")
     end: int = Field(description="End position")
     copy_number: float = Field(description="Copy number value")
+    log2_ratio: float = Field(description="Log2 copy number ratio relative to expected (diploid)")
     confidence: float = Field(description="Confidence score")
     type: str = Field(description="CNV type (gain/loss)")
     
@@ -126,7 +127,13 @@ class CNVRegion(BaseModel):
     def validate_copy_number(cls, v):
         """Validate that copy number is positive or zero."""
         if v < 0:
-            raise ValueError("Copy number must be positive or zero")
+            raise ValueError("Copy number must be non-negative")
+        return v
+    
+    @field_validator('log2_ratio')
+    @classmethod
+    def validate_log2_ratio(cls, v):
+        """No restriction, can be any float (including -inf)."""
         return v
     
     @field_validator('confidence')
@@ -143,6 +150,31 @@ class CNVRegion(BaseModel):
         """Validate that CNV type is valid."""
         if v not in ['gain', 'loss']:
             raise ValueError("CNV type must be 'gain' or 'loss'")
+        return v
+
+
+class ChromosomeArmCNV(BaseModel):
+    """CNV summary for a chromosome arm."""
+    
+    chromosome: str = Field(description="Chromosome name")
+    arm: str = Field(description="Arm: 'p' or 'q'")
+    mean_log2_ratio: float = Field(description="Mean log2 ratio across bins in this arm")
+    call: str = Field(description="Call: 'gain', 'loss', or 'neutral'")
+
+    @field_validator('arm')
+    @classmethod
+    def validate_arm(cls, v):
+        """Validate arm is 'p' or 'q'."""
+        if v not in ['p', 'q']:
+            raise ValueError("Arm must be 'p' or 'q'")
+        return v
+
+    @field_validator('call')
+    @classmethod
+    def validate_call(cls, v):
+        """Validate call is one of the allowed values."""
+        if v not in ['gain', 'loss', 'neutral']:
+            raise ValueError("Call must be 'gain', 'loss', or 'neutral'")
         return v
 
 
@@ -197,6 +229,16 @@ class FeatureSet(BaseModel):
     fragment_stats: Optional[FragmentLengthStats] = Field(
         default=None, 
         description="Fragment length statistics"
+    )
+
+    # CNV summary statistics
+    cnv_burden: float = Field(default=0.0, description="Number of bins with |log2_ratio| > 0.3")
+    amplification_burden: float = Field(default=0.0, description="Number of bins with log2_ratio > 0.3")
+    deletion_burden: float = Field(default=0.0, description="Number of bins with log2_ratio < -0.3")
+    cnv_amplitude: float = Field(default=0.0, description="Mean absolute log2 ratio across all bins")
+    chromosome_arm_cnvs: List[ChromosomeArmCNV] = Field(
+        default_factory=list,
+        description="Per-chromosome-arm CNV summary"
     )
     
     # Genomic variant bins

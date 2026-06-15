@@ -5,6 +5,7 @@ Quality control functionality for genomic data.
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from ..utils import log_command
+from .alignment import validate_bam_file
 import gzip
 import numpy as np
 import pysam
@@ -20,14 +21,18 @@ def run_quality_control(
     output_dir: Path,
     logger: structlog.BoundLogger,
     post_trimming_fastq: Optional[List[Path]] = None,
+    dup_metrics_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Run quality control on FASTQ files.
     
     Args:
         fastq_files: List of FASTQ file paths
+        bam_file: Path to BAM file for additional metrics
         output_dir: Output directory for QC results
         logger: Logger instance
+        post_trimming_fastq: Extra FASTQ file paths from post-trimming step
+        dup_metrics_file: Path to duplicate metrics file
         
     Returns:
         Dictionary containing quality control metrics
@@ -56,6 +61,13 @@ def run_quality_control(
     # Calculate basic statistics
     if bam_file is not None:
         qc_results.update(_calculate_bam_stats(bam_file, logger))
+        is_valid, dup_rates = validate_bam_file(bam_file, logger, dup_metrics_file)
+        if dup_rates['duplication_rate_picard'] is not None:
+            qc_results['duplication_rate'] = dup_rates['duplication_rate_picard']
+        else:
+            qc_results['duplication_rate'] = dup_rates['duplication_rate_flagstat']
+        qc_results['duplication_rate_flagstat'] = dup_rates['duplication_rate_flagstat']
+        qc_results['duplication_rate_picard'] = dup_rates['duplication_rate_picard']
     
     # Calculate quality scores
     qc_results.update(_calculate_quality_scores(qc_results, logger))

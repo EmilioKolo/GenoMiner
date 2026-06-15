@@ -159,13 +159,15 @@ class Pipeline:
             trimmed_fastq = self._run_trimming(sample_id, fastq_files)
             
             # Step 2: Alignment using trimmed FASTQ
-            bam_file = self._run_alignment(sample_id, trimmed_fastq)
+            bam_file, dup_metrics = self._run_alignment(sample_id, trimmed_fastq)
             
             # Step 3: Variant Calling
             vcf_file, snpeff_file = self._run_variant_calling(sample_id, bam_file)
 
             # Step 4: Quality Control
-            qc_results = self._run_quality_control(fastq_files, bam_file, post_trimming_fastq=trimmed_fastq)
+            qc_results = self._run_quality_control(fastq_files, bam_file, 
+                                                   post_trimming_fastq=trimmed_fastq, 
+                                                   dup_metrics_file=dup_metrics)
             
             # Step 5: Feature Extraction
             features = self._extract_features(sample_id, bam_file, vcf_file, snpeff_file)
@@ -187,7 +189,9 @@ class Pipeline:
             log_error(self.logger, e, context={"sample_id": sample_id, "operation": "pipeline"})
             raise
     
-    def _run_quality_control(self, fastq_files: List[Path], bam_file: Path|None, post_trimming_fastq: List[Path]|None = None) -> Dict[str, Any]:
+    def _run_quality_control(self, fastq_files: List[Path], bam_file: Path|None, 
+                             post_trimming_fastq: List[Path]|None = None, 
+                             dup_metrics_file: Path|None = None) -> Dict[str, Any]:
         """Run quality control on FASTQ files."""
         with PipelineLogger(self.logger, "quality_control") as plog:
             plog.add_context(fastq_files=[str(f) for f in fastq_files])
@@ -198,7 +202,8 @@ class Pipeline:
                     bam_file=bam_file,
                     output_dir=self.config.get_tmp_dir(),
                     logger=self.logger,
-                    post_trimming_fastq=post_trimming_fastq
+                    post_trimming_fastq=post_trimming_fastq,
+                    dup_metrics_file=dup_metrics_file
                 )
                 
                 plog.log_progress("Quality control completed")
@@ -226,13 +231,13 @@ class Pipeline:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "trimming"})
                 raise
     
-    def _run_alignment(self, sample_id: str, fastq_files: List[Path]) -> Path:
+    def _run_alignment(self, sample_id: str, fastq_files: List[Path]) -> tuple[Path, Path]:
         """Run alignment of FASTQ files to reference genome."""
         with PipelineLogger(self.logger, f"alignment_{sample_id}") as plog:
             plog.add_context(sample_id=sample_id, fastq_files=[str(f) for f in fastq_files])
             
             try:
-                bam_file = alignment.run_alignment(
+                bam_file, dup_metrics = alignment.run_alignment(
                     sample_id=sample_id,
                     fastq_files=fastq_files,
                     reference_fasta=Path(str(self.config.reference_fasta)),
@@ -242,7 +247,7 @@ class Pipeline:
                 )
                 
                 plog.log_progress(f"Alignment completed: {bam_file}")
-                return bam_file
+                return bam_file, dup_metrics
                 
             except Exception as e:
                 log_error(self.logger, e, context={"sample_id": sample_id, "operation": "alignment"})

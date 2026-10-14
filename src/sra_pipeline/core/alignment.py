@@ -139,7 +139,7 @@ def _convert_sam_to_bam(
             capture_output=True,
             text=True,
             check=True,
-            timeout=1800  # 30 minute timeout
+            #timeout=7200  # 2 hour timeout
         )
         
         logger.info("SAM to BAM conversion completed", 
@@ -177,7 +177,7 @@ def _sort_bam(
             capture_output=True,
             text=True,
             check=True,
-            timeout=3600  # 1 hour timeout
+            #timeout=7200  # 2 hour timeout
         )
         
         logger.info("BAM sorting completed", 
@@ -192,6 +192,67 @@ def _sort_bam(
         raise RuntimeError(f"BAM sorting failed for sample {sample_id}: {e.stderr}")
 
 
+<<<<<<< Updated upstream
+=======
+def _mark_duplicates(
+    sample_id: str,
+    sorted_bam_file: Path,
+    output_dir: Path,
+    logger: structlog.BoundLogger
+) -> Path:
+    """
+    Run Picard MarkDuplicates to mark duplicate reads.
+    
+    Args:
+        sample_id: Sample identifier
+        sorted_bam_file: Sorted BAM file input
+        output_dir: Output directory for marked BAM and metrics file
+        logger: Logger instance
+        
+    Returns:
+        Path to the metrics file
+    """
+    marked_bam_file = output_dir / f"{sample_id}_sorted_marked.bam"
+    metrics_file = output_dir / f"{sample_id}_dup_metrics.txt"
+    
+    cmd = [
+        "picard", "MarkDuplicates",
+        f"I={sorted_bam_file}",
+        f"O={marked_bam_file}",
+        f"M={metrics_file}",
+        "REMOVE_DUPLICATES=false",
+        "ASSUME_SORTED=true",
+        "VALIDATION_STRINGENCY=SILENT"
+    ]
+    
+    log_command(logger, " ".join(cmd), sample_id=sample_id)
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            #timeout=7200  # 2 hour timeout
+        )
+        logger.info("Duplicate marking completed", 
+                    sample_id=sample_id, 
+                    marked_bam=str(marked_bam_file),
+                    metrics_file=str(metrics_file))
+        
+        # Replace original sorted BAM with marked BAM for further steps
+        sorted_bam_file.unlink()
+        marked_bam_file.rename(sorted_bam_file)
+        
+        return metrics_file
+        
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"MarkDuplicates timed out for sample: {sample_id}")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"MarkDuplicates failed for sample {sample_id}: {e.stderr}")
+
+
+>>>>>>> Stashed changes
 def _index_bam(
     sample_id: str,
     bam_file: Path,
@@ -213,7 +274,7 @@ def _index_bam(
             capture_output=True,
             text=True,
             check=True,
-            timeout=1800  # 30 minute timeout
+            #timeout=7200  # 2 hour timeout
         )
         
         logger.info("BAM indexing completed", 
@@ -243,6 +304,7 @@ def _cleanup_intermediate_files(files: List[Path], logger: structlog.BoundLogger
 def validate_bam_file(bam_file: Path, logger: structlog.BoundLogger) -> bool:
     """Validate that BAM file is properly formatted and indexed."""
     try:
+<<<<<<< Updated upstream
         # Check if BAM file exists and is not empty
         if not bam_file.exists():
             logger.error("BAM file does not exist", file=str(bam_file))
@@ -277,6 +339,23 @@ def validate_bam_file(bam_file: Path, logger: structlog.BoundLogger) -> bool:
         
         return True
         
+=======
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, #timeout=1200
+                                )
+        # Parse duplication rate from flagstat output
+        for line in result.stdout.splitlines():
+            if 'duplicates' in line:
+                # Example line: "0 + 0 duplicates"
+                parts = line.split()
+                if len(parts) >= 1:
+                    dup_reads = int(parts[0])
+                    total_reads_line = [l for l in result.stdout.splitlines() if 'in total' in l]
+                    if total_reads_line:
+                        total_reads = int(total_reads_line[0].split()[0])
+                        if total_reads > 0:
+                            rates['duplication_rate_flagstat'] = (dup_reads / total_reads) * 100.0
+        logger.info("Flagstat duplication rate parsed", rate=rates['duplication_rate_flagstat'])
+>>>>>>> Stashed changes
     except Exception as e:
         logger.error("BAM file validation error", file=str(bam_file), error=str(e))
         return False 

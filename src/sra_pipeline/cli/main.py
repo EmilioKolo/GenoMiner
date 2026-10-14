@@ -103,16 +103,17 @@ def run(
     
     # Load configuration
     try:
-        if config:
-            pipeline_config = PipelineConfig(_env_file=config)
-        else:
-            pipeline_config = PipelineConfig()
-        
-        # Override config with CLI options
+        # Load from config.ini (or user-provided --config)
+        ini_path = config if config else Path("config.ini")
+        ini_values = PipelineConfig.from_ini(ini_path)
+        pipeline_config = PipelineConfig(**ini_values)
+
+        # Override with CLI arguments (these take precedence)
         pipeline_config.output_dir = output_dir
         pipeline_config.threads = threads
         pipeline_config.log_level = log_level
-        pipeline_config.log_file = log_file
+        if log_file:
+            pipeline_config.log_file = log_file
         
     except Exception as e:
         console.print(f"[red]Error loading configuration: {e}[/red]")
@@ -259,16 +260,16 @@ def batch(
     
     # Load configuration
     try:
-        if config:
-            pipeline_config = PipelineConfig(_env_file=config)
-        else:
-            pipeline_config = PipelineConfig()
+        ini_path = config if config else Path("config.ini")
+        ini_values = PipelineConfig.from_ini(ini_path)
+        pipeline_config = PipelineConfig(**ini_values)
         
         # Override config with CLI options
         pipeline_config.output_dir = output_dir
         pipeline_config.threads = threads
         pipeline_config.log_level = log_level
-        pipeline_config.log_file = log_file
+        if log_file:
+            pipeline_config.log_file = log_file
         
     except Exception as e:
         console.print(f"[red]Error loading configuration: {e}[/red]")
@@ -316,10 +317,9 @@ def validate(config: Optional[Path]):
     """Validate pipeline configuration and dependencies."""
     
     try:
-        if config:
-            pipeline_config = PipelineConfig(_env_file=config)
-        else:
-            pipeline_config = PipelineConfig()
+        ini_path = config if config else Path("config.ini")
+        ini_values = PipelineConfig.from_ini(ini_path)
+        pipeline_config = PipelineConfig(**ini_values)
         
         console.print("[bold blue]Validating pipeline configuration...[/bold blue]")
         

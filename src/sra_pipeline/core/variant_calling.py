@@ -222,7 +222,7 @@ def _filter_variants(
             capture_output=True,
             text=True,
             check=True,
-            timeout=1800  # 30 minute timeout
+            #timeout=3600  # 1 hour timeout
         )
         
         logger.info("Variant filtering completed", 
@@ -257,7 +257,7 @@ def _compress_and_index_vcf(
             capture_output=True,
             text=True,
             check=True,
-            timeout=900  # 15 minute timeout
+            #timeout=1800  # 30 minute timeout
         )
         
         # Index VCF
@@ -269,7 +269,7 @@ def _compress_and_index_vcf(
             capture_output=True,
             text=True,
             check=True,
-            timeout=900  # 15 minute timeout
+            #timeout=1800  # 30 minute timeout
         )
         
         logger.info("VCF compression and indexing completed", 
@@ -403,7 +403,7 @@ def merge_vcf_files(
             capture_output=True,
             text=True,
             check=True,
-            timeout=900  # 15 minute timeout
+            #timeout=1800  # 30 minute timeout
         )
         
         # Clean up file list
@@ -433,7 +433,7 @@ def _count_variants(vcf_file: Path, logger: structlog.BoundLogger) -> int:
             capture_output=True,
             text=True,
             check=True,
-            timeout=1200 # 20 minute timeout
+            #timeout=2400 # 2 hour timeout
         )
         return len(result.stdout.strip().split('\n')) if result.stdout.strip() else 0
     except Exception as e:

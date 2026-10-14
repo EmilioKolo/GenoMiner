@@ -1,0 +1,19 @@
+
+./scripts/install/install_tools.sh; \
+./install_dev.sh; \
+sra-pipeline-setup
+
+# Check pipeline version
+sra-pipeline --version
+
+# Validate setup
+sra-pipeline validate
+
+bash batch_fastq.sh
+# /mnt/d/cdi/chukwu/Samples_jun_15_2026/fastq/
+
+# Run pipeline
+sra-pipeline run \
+    --sra-id SRR123456 \
+    --output-dir ./results_test \
+    --config config.ini

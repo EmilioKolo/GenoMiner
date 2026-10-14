@@ -2,9 +2,13 @@
 Configuration settings for the SRA to Features Pipeline.
 """
 
+<<<<<<< Updated upstream
 import os
+=======
+import configparser
+>>>>>>> Stashed changes
 from pathlib import Path
-from typing import Optional, List
+from typing import Dict, Optional, List, Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -124,6 +128,68 @@ class PipelineConfig(BaseSettings):
         """Get the temporary directory path."""
         return self.get_data_dir() / "tmp"
     
+    @classmethod
+    def from_ini(cls, ini_path: Optional[Path] = None) -> Dict[str, Any]:
+        """
+        Read config.ini and return a dict of values that can be passed to the constructor.
+        If ini_path is None, look for 'config.ini' in the current working directory.
+        """
+        if ini_path is None:
+            ini_path = Path("config.ini")
+        if not ini_path.exists():
+            return {}
+
+        config = configparser.ConfigParser()
+        config.read(ini_path)
+
+        # Map INI sections/keys to Pydantic field names
+        mapping = {
+            "Paths": {
+                "BASE_DIR": "base_dir",
+                "REFERENCE_FASTA": "reference_fasta",
+                "REFERENCE_GFF": "reference_gff",
+                "BED_FILE": "bed_file",
+                "BED_GENES": "bed_genes",
+                "GENOME_SIZES": "genome_sizes",
+                "SNPEFF_DIR": "snpeff_dir",
+                "KRAKEN_DB": "kraken_db",
+            },
+            "Parameters": {
+                "GENOME_NAME": "genome_name",
+                "BIN_SIZE_GVS": "bin_size_gvs",
+                "BIN_SIZE_CNV": "bin_size_cnv",
+                "THREADS": "threads",
+            },
+            "Links": {
+                "FASTA_URL": "fasta_url",
+                "GFF_URL": "gff_url",
+                "SNPEFF_URL": "snpeff_url",
+                "KRAKEN2_DB_URL": "kraken2_db_url",
+            },
+        }
+
+        values = {}
+        for section, fields in mapping.items():
+            if not config.has_section(section):
+                continue
+            for ini_key, field_name in fields.items():
+                if config.has_option(section, ini_key):
+                    raw = config.get(section, ini_key)
+                    # Convert to appropriate type based on field annotation
+                    field_info = cls.model_fields.get(field_name)
+                    if field_info is None:
+                        continue
+                    annotation = field_info.annotation
+                    if annotation is bool:
+                        values[field_name] = config.getboolean(section, ini_key)
+                    elif annotation is int:
+                        values[field_name] = config.getint(section, ini_key)
+                    elif annotation is float:
+                        values[field_name] = config.getfloat(section, ini_key)
+                    else:
+                        values[field_name] = raw
+        return values
+
     def ensure_directories(self) -> None:
         """Ensure all required directories exist."""
         directories = [

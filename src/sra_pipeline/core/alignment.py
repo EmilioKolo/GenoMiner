@@ -192,8 +192,6 @@ def _sort_bam(
         raise RuntimeError(f"BAM sorting failed for sample {sample_id}: {e.stderr}")
 
 
-<<<<<<< Updated upstream
-=======
 def _mark_duplicates(
     sample_id: str,
     sorted_bam_file: Path,
@@ -252,7 +250,6 @@ def _mark_duplicates(
         raise RuntimeError(f"MarkDuplicates failed for sample {sample_id}: {e.stderr}")
 
 
->>>>>>> Stashed changes
 def _index_bam(
     sample_id: str,
     bam_file: Path,
@@ -304,7 +301,6 @@ def _cleanup_intermediate_files(files: List[Path], logger: structlog.BoundLogger
 def validate_bam_file(bam_file: Path, logger: structlog.BoundLogger) -> bool:
     """Validate that BAM file is properly formatted and indexed."""
     try:
-<<<<<<< Updated upstream
         # Check if BAM file exists and is not empty
         if not bam_file.exists():
             logger.error("BAM file does not exist", file=str(bam_file))
@@ -339,23 +335,6 @@ def validate_bam_file(bam_file: Path, logger: structlog.BoundLogger) -> bool:
         
         return True
         
-=======
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, #timeout=1200
-                                )
-        # Parse duplication rate from flagstat output
-        for line in result.stdout.splitlines():
-            if 'duplicates' in line:
-                # Example line: "0 + 0 duplicates"
-                parts = line.split()
-                if len(parts) >= 1:
-                    dup_reads = int(parts[0])
-                    total_reads_line = [l for l in result.stdout.splitlines() if 'in total' in l]
-                    if total_reads_line:
-                        total_reads = int(total_reads_line[0].split()[0])
-                        if total_reads > 0:
-                            rates['duplication_rate_flagstat'] = (dup_reads / total_reads) * 100.0
-        logger.info("Flagstat duplication rate parsed", rate=rates['duplication_rate_flagstat'])
->>>>>>> Stashed changes
     except Exception as e:
         logger.error("BAM file validation error", file=str(bam_file), error=str(e))
         return False 

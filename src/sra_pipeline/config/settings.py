@@ -2,11 +2,8 @@
 Configuration settings for the SRA to Features Pipeline.
 """
 
-<<<<<<< Updated upstream
 import os
-=======
 import configparser
->>>>>>> Stashed changes
 from pathlib import Path
 from typing import Dict, Optional, List, Any
 from pydantic import Field, field_validator

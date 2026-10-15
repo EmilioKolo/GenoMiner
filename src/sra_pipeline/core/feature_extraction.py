@@ -13,6 +13,7 @@ import structlog
 import subprocess
 import sys
 import tempfile
+import threading
 
 from ..models.features import (
     ChromosomeArmCNV,
@@ -357,26 +358,12 @@ def _extract_gene_variants(
         bed_data += f"{gene['chr']}\t{gene['start']}\t" + \
                     f"{gene['end']}\t{gene['gene_name']}\n"
     
-    # Run bcftools intersect and capture the output
+    # Run bcftools view
     cmd = ["bcftools", "view", "-R", "-", str(vcf_file)]
-    
+
     log_command(logger, " ".join(cmd), vcf_file=str(vcf_file))
 
-    try:
-        result = subprocess.run(
-            cmd,
-            input=bed_data,
-            capture_output=True,
-            text=True,
-            #timeout=3600  # 1 hour timeout
-        )
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"bcftools view timed out for sample: {sample_id}")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"bcftools view failed for sample {sample_id}: {e.stderr}")
-
-    # Parse the bcftools output to count variants per gene
+    # Initialize counters before streaming
     varcount_all = {gene['gene_name']: 0 for gene in gene_data}
     varcount_syn = {gene['gene_name']: 0 for gene in gene_data}
     varcount_nonsyn = {gene['gene_name']: 0 for gene in gene_data}
@@ -384,22 +371,48 @@ def _extract_gene_variants(
     # Start a set of unhandled genetic effects
     unhandled_effects = set()
     n_unhandled = 0
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
+
+    # stderr goes to a temp file
+    stderr_tmp = tempfile.TemporaryFile(mode="w+t")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr_tmp,
+            text=True,
+            bufsize=1,          # line-buffered
+        )
+    except FileNotFoundError:
+        stderr_tmp.close()
+        logger.error("bcftools command not found. Please ensure bcftools is installed and in your PATH.",
+                    sample_id=sample_id)
+        return []
+
+    # Feed the BED regions on a separate thread so neither pipe can deadlock
+    writer = threading.Thread(target=_feed_stdin, args=(proc, bed_data), daemon=True)
+    writer.start()
+
+    # Stream and parse line by line — no giant list is ever materialized
+    try:
+        for line in proc.stdout:
             if line.startswith('#'):
                 continue
-            parts = line.split('\t')
-            chr = parts[0]
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 8:
+                continue
+            chrom = parts[0]
             start = int(parts[1])
             # Determine which gene the variant belongs to
             for gene in gene_data:
-                if gene['chr'] == chr and \
+                if gene['chr'] == chrom and \
                     gene['start'] <= start <= gene['end']:
                     # Count the variant to varcount_all
                     varcount_all[gene['gene_name']] += 1
                     # Define if the variant is synonymous or nonsynonymous
                     info_field = parts[7].split(';')
-                    if "INDEL"==info_field[0].upper():
+                    if "INDEL" == info_field[0].upper():
                         varcount_indel[gene['gene_name']] += 1
                     else:
                         ann_field = _extract_ann(info_field)
@@ -408,9 +421,9 @@ def _extract_gene_variants(
                         synonymous = False
                         for ann in l_ann:
                             if 'missense_variant' in ann.lower() or \
-                               'nonsense_variant' in ann.lower() or \
-                                'stop_gained' in ann.lower() or \
-                                'stop_lost' in ann.lower():
+                            'nonsense_variant' in ann.lower() or \
+                            'stop_gained' in ann.lower() or \
+                            'stop_lost' in ann.lower():
                                 varcount_nonsyn[gene['gene_name']] += 1
                                 nonsynonymous = True
                             if 'synonymous_variant' in ann.lower():
@@ -427,17 +440,28 @@ def _extract_gene_variants(
                                 curr_eff = ann.split('|')[1] if '|' in ann else ann
                                 unhandled_effects.add(curr_eff)
                                 n_unhandled += 1
-        # Check if there were unhandled effects
-        if unhandled_effects:
-            logger.warning(
-                f"There were {n_unhandled} unhandled effects of the following types: {unhandled_effects}",
-                sample_id=sample_id)
-    else:
+    finally:
+        # Always drain stdout, close it, and reap the child
+        proc.stdout.close()
+        returncode = proc.wait()
+        writer.join(timeout=1)
+        stderr_tmp.seek(0)
+        stderr_output = stderr_tmp.read()
+        stderr_tmp.close()
+
+    if returncode != 0:
         logger.warning(
-            f"Bad returncode: {result.returncode}\n{result.stderr}",
+            f"Bad returncode: {returncode}\n{stderr_output}",
             sample_id=sample_id
         )
         return []
+
+    # Check if there were unhandled effects
+    if unhandled_effects:
+        logger.warning(
+            f"There were {n_unhandled} unhandled effects of the following types: {unhandled_effects}",
+            sample_id=sample_id)
+    
     # Define values per gene
     for gene in gene_data:
         n_var = varcount_all.get(gene['gene_name'], 0)
@@ -519,6 +543,7 @@ def _extract_cnv_regions(
             cnv_regions = []
     return cnv_regions
 
+
 def _extract_ann(info_field:list[str]) -> str:
     """Extracts the ANN field from a snpEff vcf into a string."""
     # Go through info_field
@@ -526,6 +551,7 @@ def _extract_ann(info_field:list[str]) -> str:
         if field.startswith('ANN='):
             return field.split('ANN=')[1]
     return ""
+
 
 def _extract_chromosome_arm_cnvs(
     cnv_regions: List[CNVRegion],
@@ -609,6 +635,7 @@ def _extract_chromosome_arm_cnvs(
     logger.info(f"Chromosome-arm CNV summary: {len(arm_cnvs)} arms processed")
     return arm_cnvs
 
+
 def _extract_cnv_summary_features(
     cnv_regions: List[CNVRegion],
     logger: structlog.BoundLogger
@@ -652,6 +679,7 @@ def _extract_cnv_summary_features(
     logger.info(f"CNV summary: burden={burden}, amplifications={amplification}, "
                 f"deletions={deletion}, amplitude={amplitude:.4f}")
     return float(burden), float(amplification), float(deletion), amplitude
+
 
 def _run_cnvpytor(
     sample_id: str,
@@ -752,6 +780,7 @@ def _run_cnvpytor(
     
     return cnv_call_file
 
+
 def _read_cnvpytor_out(
     sample_id: str,
     cnv_call_file: Path,
@@ -799,3 +828,11 @@ def _read_cnvpytor_out(
             type=cnv_type
         ))
     return cnv_regions
+
+
+def _feed_stdin(p, data):
+    try:
+        p.stdin.write(data)
+        p.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass

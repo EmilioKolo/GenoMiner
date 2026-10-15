@@ -225,6 +225,7 @@ class Pipeline:
                     output_dir=self.config.get_data_dir() / "trimmed",
                     logger=self.logger,
                     threads=self.config.threads,
+                    adapter_dir=self.config.trimmomatic_adapter_dir,
                 )
                 plog.log_progress(f"Trimming completed, {len(trimmed)} files")
                 return trimmed

@@ -3,6 +3,8 @@
 Adapter trimming and quality filtering using Trimmomatic.
 """
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
@@ -16,7 +18,7 @@ def run_trimming(
     fastq_files: List[Path],
     output_dir: Path,
     logger: structlog.BoundLogger,
-    adapter_fasta: Optional[Path] = None,
+    adapter_dir: Optional[Path] = None,
     threads: int = 1,
 ) -> List[Path]:
     """
@@ -27,7 +29,8 @@ def run_trimming(
         fastq_files: List of input FASTQ file paths (1 or 2 files)
         output_dir: Output directory for trimmed FASTQ files
         logger: Logger instance
-        adapter_fasta: Path to adapter sequences FASTA (default: TruSeq3-PE.fa)
+        adapter_dir: Directory containing Trimmomatic adapter FASTAs
+                     (TruSeq3-PE.fa for paired-end, TruSeq3-SE.fa for single-end)
         threads: Number of threads to use
 
     Returns:
@@ -39,23 +42,24 @@ def run_trimming(
     if len(fastq_files) not in (1, 2):
         raise ValueError(f"Expected 1 or 2 FASTQ files, got {len(fastq_files)}")
 
-    # Default adapter file (TruSeq3-PE) assumes standard location or PATH
-    if adapter_fasta is None:
-        # Try to locate TruSeq3-PE.fa in common Trimmomatic installation
-        import shutil
-        trimmomatic_path = shutil.which("trimmomatic")
-        if trimmomatic_path:
-            base_dir = Path(trimmomatic_path).parent.parent
-            candidate = base_dir / "share" / "trimmomatic" / "adapters" / "TruSeq3-PE.fa"
-            if candidate.exists():
-                adapter_fasta = candidate
-        if adapter_fasta is None or not adapter_fasta.exists():
-            # Fallback: assume file is in current directory or provided
-            adapter_fasta = Path("TruSeq3-PE.fa")
-            if not adapter_fasta.exists():
-                raise FileNotFoundError(
-                    "TruSeq3-PE.fa not found. Please provide adapter_fasta path."
-                )
+    # Determine which adapter file is needed based on SE vs PE.
+    if len(fastq_files) == 1:
+        adapter_name = "TruSeq3-SE.fa"
+        mode = "SE"
+    else:
+        adapter_name = "TruSeq3-PE.fa"
+        mode = "PE"
+
+    # Resolve adapter directory: explicit config path first, then discovery.
+    adapter_dir = _resolve_adapter_dir(adapter_dir, mode, logger)
+    adapter_fasta = adapter_dir / adapter_name
+    if not adapter_fasta.exists():
+        raise FileNotFoundError(
+            f"{adapter_name} not found in adapter directory {adapter_dir}. "
+            f"Expected file: {adapter_fasta}. "
+            f"Set TRIMMOMATIC_ADAPTER_DIR in config.ini or export it as an "
+            f"environment variable."
+        )
 
     logger.info(
         "Starting Trimmomatic trimming",
@@ -125,8 +129,7 @@ def _build_trimmomatic_se_cmd(
 ) -> List[str]:
     """Build command line for single-end Trimmomatic."""
     return [
-        "trimmomatic",
-        "SE",
+        "TrimmomaticSE",
         "-threads", str(threads),
         str(input_fastq),
         str(output_paired),
@@ -150,8 +153,7 @@ def _build_trimmomatic_pe_cmd(
 ) -> List[str]:
     """Build command line for paired-end Trimmomatic."""
     return [
-        "trimmomatic",
-        "PE",
+        "TrimmomaticPE",
         "-threads", str(threads),
         str(forward_input),
         str(reverse_input),
@@ -165,3 +167,93 @@ def _build_trimmomatic_pe_cmd(
         "TRAILING:3",
         "MINLEN:36",
     ]
+
+def _resolve_adapter_dir(
+    adapter_dir: Optional[Path],
+    mode: str,
+    logger: structlog.BoundLogger,
+) -> Path:
+    """
+    Resolve the directory that contains Trimmomatic adapter FASTAs.
+
+    Order of precedence:
+      1. Explicit directory passed in (from config.ini via PipelineConfig).
+      2. TRIMMOMATIC_ADAPTER_DIR environment variable.
+      3. $TRIMMOMATIC_HOME/adapters.
+      4. $CONDA_PREFIX/share/trimmomatic/adapters.
+      5. Paths derived from the `trimmomatic` binary on PATH.
+      6. Well-known system locations.
+      7. Current working directory.
+
+    A candidate directory is accepted only if it exists AND contains the
+    adapter file matching the requested mode (TruSeq3-SE.fa for SE,
+    TruSeq3-PE.fa for PE). The `default_name` argument is used only to
+    probe directories when the mode-specific file is not present yet, so
+    the caller can still get a useful error listing what was tried.
+
+    Raises:
+        FileNotFoundError: If no candidate directory contains the required
+                           adapter file.
+    """
+    required_name = "TruSeq3-SE.fa" if mode == "SE" else "TruSeq3-PE.fa"
+    candidates: List[Path] = []
+
+    # 1. Explicit path from config
+    if adapter_dir is not None:
+        candidates.append(adapter_dir)
+
+    # 2. Environment variable
+    env_dir = os.environ.get("TRIMMOMATIC_ADAPTER_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    # 3. TRIMMOMATIC_HOME
+    tm_home = os.environ.get("TRIMMOMATIC_HOME")
+    if tm_home:
+        candidates.append(Path(tm_home) / "adapters")
+
+    # 4. Conda prefix
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        candidates.append(Path(conda_prefix) / "share" / "trimmomatic" / "adapters")
+
+    # 5. Derive from the `trimmomatic` binary on PATH
+    tm_which = shutil.which("trimmomatic")
+    if tm_which:
+        tm_path = Path(tm_which).resolve()
+        candidates.append(tm_path.parent.parent / "share" / "trimmomatic" / "adapters")
+        candidates.append(tm_path.parent / "adapters")
+        for jar in tm_path.parent.glob("trimmomatic*.jar"):
+            candidates.append(jar.parent / "adapters")
+
+    # 6. Well-known system locations
+    candidates.extend([
+        Path("/usr/share/trimmomatic/adapters"),
+        Path("/usr/local/share/trimmomatic/adapters"),
+        Path("/opt/trimmomatic/adapters"),
+    ])
+
+    # 7. Current working directory
+    candidates.append(Path.cwd())
+
+    tried: List[str] = []
+    for candidate in candidates:
+        tried.append(str(candidate))
+        if candidate.is_dir() and (candidate / required_name).exists():
+            logger.info(
+                "Resolved Trimmomatic adapter directory",
+                adapter_dir=str(candidate),
+                adapter_file=required_name,
+                mode=mode,
+            )
+            return candidate
+
+    tried_str = "\n  - ".join(tried)
+    raise FileNotFoundError(
+        f"Could not find {required_name} in any candidate adapter directory "
+        f"(mode={mode}). Tried:\n  - {tried_str}\n\n"
+        "Provide the adapter directory by any of these methods:\n"
+        "  1. Set TRIMMOMATIC_ADAPTER_DIR in config.ini under [Paths]\n"
+        "  2. Export the TRIMMOMATIC_ADAPTER_DIR environment variable\n"
+        "  3. Pass adapter_dir explicitly to run_trimming()"
+    )

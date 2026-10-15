@@ -29,7 +29,8 @@ class PipelineConfig(BaseSettings):
     kraken_db: Optional[Path] = Field(default=None, description="Kraken2 database directory")
     snpeff_dir: Optional[Path] = Field(default=None, description="snpEff installation directory")
     trimmomatic_jar: Optional[Path] = Field(default=None, description="Path to Trimmomatic JAR file (if not in PATH)")
-    
+    trimmomatic_adapter_dir: Optional[Path] = Field(default=None, description="Directory containing Trimmomatic adapter FASTAs (TruSeq3-PE.fa, TruSeq3-SE.fa)")
+
     # Parameters
     genome_name: str = Field(default="custom_human", description="Genome name for snpEff")
     bin_size_gvs: int = Field(default=100000, description="Bin size for genomic variants")
@@ -73,7 +74,8 @@ class PipelineConfig(BaseSettings):
     annovar_db: Optional[Path] = Field(default=None, description="ANNOVAR database directory")
 
     @field_validator('base_dir', 'output_dir', 'reference_fasta', 'reference_gff', 
-                    'bed_file', 'bed_genes', 'genome_sizes', 'kraken_db', 'snpeff_dir')
+                    'bed_file', 'bed_genes', 'genome_sizes', 'kraken_db', 'snpeff_dir',
+                    'trimmomatic_adapter_dir')
     @classmethod
     def validate_paths(cls, v):
         """Validate that paths are absolute or can be resolved."""
@@ -146,7 +148,7 @@ class PipelineConfig(BaseSettings):
 
         config = configparser.ConfigParser()
         config.read(ini_path)
-
+        
         # Map INI sections/keys to Pydantic field names
         mapping = {
             "Paths": {
@@ -158,6 +160,7 @@ class PipelineConfig(BaseSettings):
                 "GENOME_SIZES": "genome_sizes",
                 "SNPEFF_DIR": "snpeff_dir",
                 "KRAKEN_DB": "kraken_db",
+                "TRIMMOMATIC_ADAPTER_DIR": "trimmomatic_adapter_dir",
             },
             "Parameters": {
                 "GENOME_NAME": "genome_name",
@@ -229,6 +232,7 @@ class PipelineConfig(BaseSettings):
         optional_dirs = [
             ("kraken_db", self.kraken_db),
             ("snpeff_dir", self.snpeff_dir),
+            ("trimmomatic_adapter_dir", self.trimmomatic_adapter_dir),
         ]
         
         for name, dir_path in optional_dirs:
